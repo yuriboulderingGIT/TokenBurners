@@ -226,7 +226,7 @@ class DB:
 
     def runs_recent(self, limit: int = 30) -> list[sqlite3.Row]:
         return self.all(
-            "SELECT runs.*, portals.url FROM runs JOIN portals ON portals.id = runs.portal_id "
+            "SELECT runs.*, portals.url, portals.deleted_at FROM runs JOIN portals ON portals.id = runs.portal_id "
             "ORDER BY runs.started_at DESC, runs.rowid DESC LIMIT ?",
             (limit,),
         )

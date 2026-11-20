@@ -187,3 +187,29 @@ def test_healthy_read_after_serve_time_close_is_not_a_second_change() -> None:
 
     db.save_tenders(portal_id, [Tender(status="closed", **(fields | {"title": "T2"}))])  # a real change
     assert asyncio.run(list_tenders(portal_id))[0]["lastChangedAt"] != served["lastChangedAt"]
+
+
+def test_dashboard_links_to_an_html_portal_page() -> None:
+    import asyncio
+
+    from app.db import db
+    from app.main import dashboard, portal_page
+    from app.models import Document, Tender
+
+    portal_id = db.portal_create("https://portal.example/ui-page")
+    db.save_tenders(portal_id, [Tender(
+        id="UI-1", url="https://portal.example/ui-1", title="Bridge <repair>", buyerName="City",
+        publicationDate="2026-11-20", submissionDeadline="2999-12-09T10:00:00+01:00", status="open",
+        documents=[Document(fileName="spec.pdf", sizeBytes=2048, sha256="ab" * 32, path="/files/abc")],
+    )])
+
+    from starlette.requests import Request
+    req = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+    page = asyncio.run(portal_page(portal_id, req))
+    html = page.body.decode()
+    assert page.status_code == 200
+    assert "Bridge &lt;repair&gt;" in html  # escaped
+    assert 'href="/files/abc"' in html and "2.0 KB" in html
+    assert "09 Dec 2999, 10:00 +01:00" in html
+    assert f"/ui/portals/{portal_id}" in asyncio.run(dashboard(req)).body.decode()
+    assert asyncio.run(portal_page("nope", req)).status_code == 404
