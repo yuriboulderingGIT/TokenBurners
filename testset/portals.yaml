@@ -1,11 +1,139 @@
-# Real test portals (owner: B2). See plan section 8.
-# Keep 3 extra portals in secret.yaml (gitignored, share privately) until H12.
-#
-# - name: example-de
-#   url: https://...
-#   country: DE
-#   software: "e.g. Cosinex, Healy Hudson, Subreport"
-#   kind: ssr            # ssr | spa_json | multi_step
-#   block: none          # none | login | captcha
-#   notes: ""
-portals: []
+# Public test portals (owner: B2). Checked 2026-11-20.
+# verification: direct (fetched notice data), shell (fetched a client-rendered entry point),
+# or documented (verified the portal from primary sources and direct notice data is pending).
+# block applies to the public URL here. A null value means login/captcha could not be assessed.
+# Fixture paths are relative to this file. HTML fixtures are trimmed to the notice elements.
+portals:
+  - name: etenders-ie
+    url: "https://www.etenders.gov.ie/epps/quickSearchAction.do?searchType=cftFTS&latest=true"
+    country: IE
+    software: European Dynamics ePPS
+    kind: ssr
+    block: none
+    verification: direct
+    fixture: fixtures/etenders-ie/list.html
+    notes: >
+      Latest calls for tender appear in table T01 with resource ID, buyer,
+      publication and closing timestamps, and relative detail links. The public
+      detail page for resource 9539391 also returned 200. Pagination and document
+      downloads are outside this check.
+
+  - name: sell2wales-gb
+    url: https://www.sell2wales.gov.wales/Search/Search_MainPage.aspx
+    country: GB
+    software: Sell2Wales
+    kind: ssr
+    block: none
+    verification: direct
+    fixture: fixtures/sell2wales-gb/list.html
+    evidence: https://www.sell2wales.gov.wales/sitehelp/help_faq.aspx
+    notes: >
+      Public result cards contain the reference, OCID, title, buyer and dates.
+      The list uses labelled fields and UK date formats. The portal documents a
+      registration requirement for attachments.
+
+  - name: vergabemarktplatz-nrw-de
+    url: https://www.evergabe.nrw.de/VMPCenter/company/welcome.do
+    country: DE
+    software: cosinex Vergabemarktplatz
+    kind: ssr
+    block: none
+    verification: direct
+    fixture: fixtures/vergabemarktplatz-nrw-de/list.html
+    notes: >
+      The latest notices appear in a table with publication and closing dates,
+      publisher, and a separate forwarding link carrying the notice ID. The
+      live page declares ISO-8859-1. The trimmed fixture is UTF-8.
+
+  - name: dtvp-de
+    url: https://dtvp.de/ausschreibungen/
+    country: DE
+    software: DTVP public directory
+    kind: ssr
+    block: none
+    verification: direct
+    fixture: fixtures/dtvp-de/list.html
+    notes: >
+      The public directory offers server-rendered notice cards with title,
+      buyer, location and closing date. The public detail page for
+      CXP4DKT4YEE also returned 200. This entry covers the directory's card
+      markup.
+
+  - name: boamp-fr
+    url: "https://boamp-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/boamp/records?select=idweb%2Cobjet%2Cnomacheteur%2Cdateparution%2Cdatelimitereponse%2Cnature_libelle%2Ctype_marche%2Curl_avis&order_by=dateparution%20desc&limit=3"
+    country: FR
+    software: BOAMP on Opendatasoft
+    kind: spa_json
+    block: none
+    verification: direct
+    fixture: fixtures/boamp-fr/list.json
+    evidence: https://boamp-datadila.opendatasoft.com/pages/donnees-ouvertes-et-api/
+    notes: >
+      The documented anonymous GET API returns records under results, including
+      null and timezone-aware closing timestamps. The URL projects eight
+      non-contact fields and limits the response to three records. Public
+      notice links point to a different origin from the API.
+
+  - name: tenderned-nl
+    url: https://www.tenderned.nl/aankondigingen/overzicht
+    country: NL
+    software: TenderNed
+    kind: spa_json
+    block: none
+    verification: shell
+    evidence: https://www.tenderned.nl/cms/nl/voor-ondernemingen/aanbestedingen-vinden-op-tenderned-als-ondernemer
+    notes: >
+      The public Angular entry page returned 200 with no listing rows in the
+      initial HTML. Anonymous JSON retrieval is unverified. The separately
+      documented XML feed requires credentials.
+
+  - name: bekanntmachungsservice-de
+    url: https://oeffentlichevergabe.de/ui/
+    country: DE
+    software: Bekanntmachungsservice
+    kind: spa_json
+    block: none
+    verification: shell
+    evidence: https://oeffentlichevergabe.de/ui/de/publicationPolicy
+    notes: >
+      The public UI returned a JavaScript shell with an empty app element.
+      The official publication policy documents an open-data interface for
+      retrospective notices. No JSON list endpoint was verified.
+
+  - name: bosa-eprocurement-be
+    url: https://www.publicprocurement.be/bda
+    country: BE
+    software: BOSA e-Procurement
+    kind: spa_json
+    block: none
+    verification: shell
+    evidence: https://bosa.belgium.be/en/applications/e-procurement
+    notes: >
+      The Tender Bulletin returned the public JavaScript entry page.
+      Browser-rendered rows and an anonymous JSON feed remain unverified.
+
+  - name: public-contracts-scotland-gb
+    url: https://www.publiccontractsscotland.gov.uk/Search/Search_MainPage.aspx
+    country: GB
+    software: Public Contracts Scotland
+    kind: ssr
+    block: null
+    verification: documented
+    evidence: https://blogs.gov.scot/public-procurement/2024/01/26/working-with-the-scottish-public-sector-how-to-search-for-opportunities-on-public-contracts-scotland/
+    notes: >
+      The Scottish Government documents the public search and notice detail
+      flow. The search listing timed out on direct retrieval and no fixture
+      was captured.
+
+  - name: place-fr
+    url: https://www.marches-publics.gouv.fr/entreprise
+    country: FR
+    software: PLACE
+    kind: multi_step
+    block: null
+    verification: documented
+    evidence: https://www.marches-publics.gouv.fr/entreprise/consultation/2276816
+    notes: >
+      The French state supplier portal offers search followed by individual
+      consultation detail pages. The linked official detail was available via
+      an indexed copy. The direct portal request returned 503.
