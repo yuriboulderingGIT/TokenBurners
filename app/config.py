@@ -15,6 +15,7 @@ LLM_CACHE_DIR = DATA_DIR / "llm_cache"
 # Worker
 REFRESH_MINUTES = float(os.getenv("REFRESH_MINUTES", "15"))
 # Failed portals are retried with a plain read (no repair, so no model cost) this often.
+# A portal that never attached has nothing to re-read, so only a manual refresh retries it.
 FAILED_RETRY_MINUTES = float(os.getenv("FAILED_RETRY_MINUTES", "180"))
 # A portal whose first read hit a temporary portal error (network, timeout, HTTP 5xx) stays
 # integrating and is tried again this soon, up to FIRST_READ_TRIES times before it is failed.

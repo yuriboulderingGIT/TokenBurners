@@ -83,6 +83,58 @@ def test_retry_that_still_fails_stays_failed_without_repair(monkeypatch) -> None
     assert portal_id not in worker.active
 
 
+# ----- failed portals that never attached -----
+
+from types import SimpleNamespace  # noqa: E402
+
+from brain.learn import AttachFailed  # noqa: E402
+
+
+def _never_attached_portal(url: str) -> str:
+    portal_id = db.portal_create(url)
+    states.set_state(db, portal_id, states.FAILED, "could not attach: no usable tender listing found")
+    return portal_id
+
+
+def test_timed_retry_skips_a_portal_that_never_attached(monkeypatch) -> None:
+    async def no_attach(*args, **kwargs):
+        raise AssertionError("a timed retry must never ask the model to attach (model cost)")
+
+    monkeypatch.setattr("app.worker.learn_recipe", no_attach)
+    worker = Worker(db, fetcher=FakeFetcher({}), llm=None)
+    portal_id = _never_attached_portal("https://portal.example/never-attached")
+    assert worker._due(portal_id, 180)  # due by the clock, but there is no recipe to re-read
+    worker._queue_due_reads()
+    assert portal_id not in worker.active
+    assert not db.runs_for(portal_id)
+
+
+def test_timed_retry_still_rereads_a_failed_portal_with_a_recipe() -> None:
+    worker = Worker(db, fetcher=None, llm=None)  # not started: reads stay queued
+    portal_id = _failed_portal("https://portal.example/timed-retry")
+    worker._queue_due_reads()
+    assert portal_id in worker.active
+
+
+def test_manual_refresh_tries_the_attach_again(monkeypatch) -> None:
+    attempts = []
+
+    async def failing_attach(url, fetch, llm):
+        attempts.append(url)
+        raise AttachFailed("no usable tender listing found")
+
+    class OneShotModel:
+        def scoped(self, *args):
+            return SimpleNamespace(total_cost=0.0)
+
+    monkeypatch.setattr("app.worker.learn_recipe", failing_attach)
+    worker = Worker(db, fetcher=FakeFetcher({}), llm=OneShotModel())
+    portal_id = _never_attached_portal("https://portal.example/manual-reattach")
+    _run_one(worker, portal_id)  # what POST /portals/{id}/refresh queues
+    assert attempts == ["https://portal.example/manual-reattach"]
+    assert db.portal_get(portal_id)["state"] == states.FAILED
+
+
 # ----- repair path -----
 
 def _serving_portal(url: str) -> str:

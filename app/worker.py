@@ -2,7 +2,8 @@
 
 - A queue of reads; WORKER_CONCURRENCY reads run at the same time (different portals).
 - At most one read per portal at a time: refresh while one is queued/running returns its runId.
-- A timer re-reads every portal every REFRESH_MINUTES.
+- A timer re-reads every portal every REFRESH_MINUTES. Failed portals get a plain re-read every
+  FAILED_RETRY_MINUTES; one that never attached is left alone until a manual refresh.
 - Pipeline per read:  attach (first time) -> run_recipe -> normalize -> documents ->
   health check -> store + serving,  or  healing -> repair -> re-read -> serving | failed.
 
@@ -91,9 +92,17 @@ class Worker:
     async def _scheduler(self) -> None:
         while True:
             await asyncio.sleep(30)
-            for portal in self.db.portal_list():
-                if self._due(portal["id"], self._retry_minutes(portal)):
-                    self.request_read(portal["id"])
+            self._queue_due_reads()
+
+    def _queue_due_reads(self) -> None:
+        for portal in self.db.portal_list():
+            if portal["state"] == states.FAILED and portal["recipe_version"] is None:
+                # It never attached, so a timed retry could only ask the model again (and get
+                # charged every FAILED_RETRY_MINUTES). Timed retries must cost nothing: only a
+                # manual refresh tries the attach again.
+                continue
+            if self._due(portal["id"], self._retry_minutes(portal)):
+                self.request_read(portal["id"])
 
     @staticmethod
     def _retry_minutes(portal) -> float:
