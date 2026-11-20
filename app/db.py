@@ -209,6 +209,15 @@ class DB:
             (limit,),
         )
 
+    def runs_by_portal(self, each: int = 24) -> dict[str, list[sqlite3.Row]]:
+        """portal_id -> its last `each` runs, oldest first (the dashboard's heartbeat strip)."""
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in self.all("SELECT * FROM runs ORDER BY started_at DESC, rowid DESC LIMIT 2000"):
+            runs = grouped.setdefault(row["portal_id"], [])
+            if len(runs) < each:
+                runs.append(row)
+        return {pid: runs[::-1] for pid, runs in grouped.items()}
+
     def last_read_started(self, portal_id: str) -> str | None:
         row = self.one(
             "SELECT MAX(started_at) AS t FROM runs WHERE portal_id = ? AND kind = 'read'", (portal_id,)
@@ -237,6 +246,15 @@ class DB:
             )
             conn.execute("UPDATE portals SET recipe_version = ? WHERE id = ?", (version, portal_id))
         return version
+
+    def recipe_history(self) -> dict[str, list[sqlite3.Row]]:
+        """portal_id -> its recipe versions, newest first (for the dashboard)."""
+        history: dict[str, list[sqlite3.Row]] = {}
+        for row in self.all(
+            "SELECT portal_id, version, created_by, created_at FROM recipes ORDER BY version DESC"
+        ):
+            history.setdefault(row["portal_id"], []).append(row)
+        return history
 
     # ----- tenders -----
 

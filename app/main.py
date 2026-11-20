@@ -24,6 +24,23 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
+def _ago(value: str | None) -> str:
+    """'2026-11-20T09:00:00+00:00' -> '4 min ago' for the dashboard."""
+    if not value:
+        return "never"
+    seconds = int((datetime.now(timezone.utc) - datetime.fromisoformat(value)).total_seconds())
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60} min ago"
+    if seconds < 86400:
+        return f"{seconds // 3600} h ago"
+    return f"{seconds // 86400} d ago"
+
+
+templates.env.filters["ago"] = _ago
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     fetcher = Fetcher()
@@ -142,11 +159,21 @@ async def get_file(file_id: str):
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     costs = db.llm_cost_by_portal()
-    portals = [dict(row) | {"cost_usd": costs.get(row["id"], 0.0)} for row in db.portal_list()]
+    recipes = db.recipe_history()
+    beats = db.runs_by_portal()
+    portals = [
+        dict(row)
+        | {"cost_usd": costs.get(row["id"], 0.0), "recipes": recipes.get(row["id"], []), "beats": beats.get(row["id"], [])}
+        for row in db.portal_list()
+    ]
+    counts = {s: sum(p["state"] == s for p in portals) for s in ("serving", "integrating", "healing", "failed")}
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"portals": portals, "runs": db.runs_recent(30), "total_cost": db.llm_total_cost()},
+        {
+            "portals": portals, "counts": counts, "runs": db.runs_recent(30), "total_cost": db.llm_total_cost(),
+            "now": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        },
     )
 
 
