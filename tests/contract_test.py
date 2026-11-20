@@ -44,6 +44,7 @@ def test_contract() -> None:
         assert set(r.json()) == {"id"}
         portal_id = r.json()["id"]
         assert client.post("/portals", json={"url": "https://portal.example/contract-a"}).json()["id"] == portal_id
+        assert client.post("/portals", json={"url": "https://portal.example/contract-a/"}).json()["id"] == portal_id
 
         # GET /portals/{id}: exact shape
         portal = wait_until_settled(client, portal_id)
