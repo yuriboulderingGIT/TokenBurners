@@ -23,8 +23,12 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+import httpx
+
 from app import states
-from app.config import FAILED_RETRY_MINUTES, REFRESH_MINUTES, WORKER_CONCURRENCY
+from app.config import (
+    FAILED_RETRY_MINUTES, FIRST_READ_TRIES, INTEGRATING_RETRY_MINUTES, REFRESH_MINUTES, WORKER_CONCURRENCY,
+)
 from app.db import DB
 from app.documents import store_documents
 from app.fetcher import Fetcher, PortalCancelled, PortalFetcher
@@ -88,9 +92,17 @@ class Worker:
         while True:
             await asyncio.sleep(30)
             for portal in self.db.portal_list():
-                minutes = FAILED_RETRY_MINUTES if portal["state"] == states.FAILED else REFRESH_MINUTES
-                if self._due(portal["id"], minutes):
+                if self._due(portal["id"], self._retry_minutes(portal)):
                     self.request_read(portal["id"])
+
+    @staticmethod
+    def _retry_minutes(portal) -> float:
+        if portal["state"] == states.FAILED:
+            return FAILED_RETRY_MINUTES
+        if portal["state"] == states.INTEGRATING:
+            # Nothing is delivered yet: a first read that hit a temporary error is tried again soon.
+            return min(INTEGRATING_RETRY_MINUTES, REFRESH_MINUTES)
+        return REFRESH_MINUTES
 
     def _due(self, portal_id: str, minutes: float) -> bool:
         last = self.db.last_read_started(portal_id)
@@ -181,7 +193,10 @@ class Worker:
             log.exception("read %s failed", run_id)
             # No repair and no retry = the re-read right after a repair (see "repaired recipe still fails").
             after_repair = not (allow_repair or retry)
-            self._keep_last_good(portal_id, run_id, f"read failed: {type(e).__name__}: {e}", after_repair)
+            self._keep_last_good(
+                portal_id, run_id, f"read failed: {type(e).__name__}: {e}", after_repair,
+                portal_hiccup=isinstance(e, httpx.HTTPError),
+            )
             self.db.run_finish(run_id, "failed", cost_usd=cost)
 
     async def _execute(self, portal_id: str, recipe: Recipe, fetch: PortalFetcher) -> ReadResult:
@@ -261,13 +276,42 @@ class Worker:
             return None
         return ReadResult(tenders=[Tender.model_validate(t) for t in stored], raw_count=len(stored))
 
-    def _keep_last_good(self, portal_id: str, run_id: str, reason: str, after_repair: bool = False) -> None:
-        """A read failed for a reason that isn't the recipe. Be honest about it."""
+    def _failed_reads_before(self, portal_id: str, run_id: str) -> int:
+        """Failed reads in a row right before this one (this run is still running, so skip it)."""
+        count = 0
+        for run in self.db.runs_for(portal_id, limit=FIRST_READ_TRIES + 5):
+            if run["id"] == run_id or run["kind"] != "read":
+                continue
+            if run["result"] != "failed":
+                break
+            count += 1
+        return count
+
+    def _keep_last_good(
+        self, portal_id: str, run_id: str, reason: str, after_repair: bool = False, portal_hiccup: bool = False,
+    ) -> None:
+        """A read failed for a reason that isn't the recipe. Be honest about it.
+
+        portal_hiccup: the portal failed temporarily (network error, timeout, HTTP 5xx/429/403).
+        A first read hit by that is tried again soon instead of failing the portal for hours.
+        """
         portal = self.db.portal_get(portal_id)
         if portal is None:
             return
-        if portal["state"] == states.INTEGRATING:
+        if portal["state"] == states.INTEGRATING and not portal_hiccup:
             states.set_state(self.db, portal_id, states.FAILED, reason, run_id)
+        elif portal["state"] == states.INTEGRATING:
+            tries = self._failed_reads_before(portal_id, run_id) + 1
+            if tries >= FIRST_READ_TRIES:
+                states.set_state(self.db, portal_id, states.FAILED, f"{reason} (gave up after {tries} tries)", run_id)
+            else:
+                # Honest: nothing is delivered yet and we are still attaching.
+                self.db.portal_update(
+                    portal_id,
+                    reason=f"{reason}; will try again in {min(INTEGRATING_RETRY_MINUTES, REFRESH_MINUTES):g} min "
+                           f"(try {tries} of {FIRST_READ_TRIES})",
+                )
+                self.db.run_note(run_id, reason)
         elif portal["state"] == states.HEALING and after_repair:
             # The re-read after a repair crashed: the new recipe is unproven. The failed-retry
             # timer tries it again later with a plain read. Any other crashed read while healing

@@ -8,8 +8,10 @@ Brain code receives a ScopedLLM (bound to one portal and run):
     data = await llm.json(prompt, system="...", strong=True)  # strong model (repair)
 """
 
+import asyncio
 import hashlib
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,9 @@ PRICES: dict[str, tuple[float, float]] = {
 }
 MAX_OUTPUT_TOKENS = 4_096
 CONTEXT_WINDOW = 400_000
+# A call that only finds the budget reserved by other running calls waits this long for them.
+RESERVATION_WAIT_SECONDS = 120.0
+RESERVATION_POLL_SECONDS = 0.25
 
 
 class BudgetExceeded(Exception):
@@ -53,6 +58,7 @@ class LLM:
         self.strong_model = strong_model
         self.cache_dir = cache_dir
         self._client = None
+        self._in_flight: dict[str, float] = {}  # reservation id -> max cost, for calls running now
 
     def scoped(self, portal_id: str, run_id: str | None, purpose: str) -> "ScopedLLM":
         return ScopedLLM(self, portal_id, run_id, purpose)
@@ -86,12 +92,58 @@ class LLM:
         # These text-only models tokenize bytes. Include headroom for the fixed Responses envelope.
         max_input = min(CONTEXT_WINDOW, len(instructions.encode()) + len(model_input.encode()) + 1_024)
         max_cost = (max_input * price_in + MAX_OUTPUT_TOKENS * price_out) / 1e6
-        reservation = self.db.llm_try_reserve(portal_id, run_id, max_cost, self.budget_usd)
-        if reservation is None:
-            raise BudgetExceeded(f"insufficient unreserved budget for this call (cap ${self.budget_usd:.2f})")
-
+        reservation = await self._reserve(portal_id, run_id, max_cost)
+        self._in_flight[reservation] = max_cost
         try:
-            response = await self._get_client().responses.create(
+            response = await self._dispatch(reservation, model, instructions, model_input)
+            usage = response.usage
+            tokens_in = getattr(usage, "input_tokens", None)
+            tokens_out = getattr(usage, "output_tokens", None)
+            if tokens_in is None or tokens_out is None:
+                raise LLMUnavailable("model returned no token usage. Budget reservation retained.")
+            cached_tokens = getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0
+            input_cost = ((tokens_in - cached_tokens) + cached_tokens / 10) * price_in / 1e6
+            cost = input_cost + tokens_out * price_out / 1e6
+            self.db.llm_log(portal_id, run_id, model, tokens_in, tokens_out, cost, purpose, reservation=reservation)
+        finally:
+            # Released, logged or deliberately retained: either way this call no longer holds it.
+            self._in_flight.pop(reservation, None)
+        if on_cost is not None:
+            on_cost(cost)
+
+        data = json.loads(response.output_text)
+        if cached:
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_text(json.dumps(data), encoding="utf-8")
+        return data, cost
+
+    async def _reserve(self, portal_id: str, run_id: str | None, max_cost: float) -> str:
+        """Reserve the call's maximum cost. If only calls still running in this process are in
+        the way, wait for them to finish instead of failing: they release what they don't use.
+
+        Reservations not held by a running call (left by a crash or deliberately retained after
+        an unconfirmed request) count as spent, so they are never waited for.
+        """
+        deadline = time.monotonic() + RESERVATION_WAIT_SECONDS
+        while True:
+            reservation = self.db.llm_try_reserve(portal_id, run_id, max_cost, self.budget_usd)
+            if reservation is not None:
+                return reservation
+            row = self.db.one("SELECT COALESCE(SUM(max_cost_usd), 0) AS r FROM llm_reservations")
+            held_elsewhere = max(0.0, float(row["r"]) - sum(self._in_flight.values()))
+            committed = self.db.llm_total_cost() + held_elsewhere
+            if not self._in_flight or committed + max_cost > self.budget_usd:
+                raise BudgetExceeded(f"insufficient unreserved budget for this call (cap ${self.budget_usd:.2f})")
+            if time.monotonic() >= deadline:
+                raise BudgetExceeded(
+                    f"budget held by other running model calls for over {RESERVATION_WAIT_SECONDS:g} s "
+                    f"(cap ${self.budget_usd:.2f})"
+                )
+            await asyncio.sleep(RESERVATION_POLL_SECONDS)
+
+    async def _dispatch(self, reservation: str, model: str, instructions: str, model_input: str):
+        try:
+            return await self._get_client().responses.create(
                 model=model,
                 instructions=instructions,
                 input=model_input,
@@ -116,24 +168,6 @@ class LLM:
                 raise LLMUnavailable("OpenAI quota exhausted") from e
             reason = f"HTTP {status}" if status else type(e).__name__
             raise LLMUnavailable(f"model call failed ({reason})") from e
-
-        usage = response.usage
-        tokens_in = getattr(usage, "input_tokens", None)
-        tokens_out = getattr(usage, "output_tokens", None)
-        if tokens_in is None or tokens_out is None:
-            raise LLMUnavailable("model returned no token usage. Budget reservation retained.")
-        cached_tokens = getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0
-        input_cost = ((tokens_in - cached_tokens) + cached_tokens / 10) * price_in / 1e6
-        cost = input_cost + tokens_out * price_out / 1e6
-        self.db.llm_log(portal_id, run_id, model, tokens_in, tokens_out, cost, purpose, reservation=reservation)
-        if on_cost is not None:
-            on_cost(cost)
-
-        data = json.loads(response.output_text)
-        if cached:
-            cached.parent.mkdir(parents=True, exist_ok=True)
-            cached.write_text(json.dumps(data), encoding="utf-8")
-        return data, cost
 
 
 class ScopedLLM:
