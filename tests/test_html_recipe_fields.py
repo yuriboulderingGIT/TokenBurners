@@ -7,6 +7,8 @@ from app.db import DB
 from app.fetcher import FakeFetcher
 from app.models import OPTIONAL_TENDER_FIELDS
 from app.worker import Worker
+from brain.learn import learn_recipe
+from brain.run_recipe import run_recipe
 
 
 def test_attach_maps_visible_notice_fields_and_leaves_sparse_notice_fields_absent(tmp_path):
@@ -89,3 +91,43 @@ def test_attach_maps_visible_notice_fields_and_leaves_sparse_notice_fields_absen
     assert full["status"] == "withdrawn"
     assert full["submissionDeadline"] == "2026-07-01T12:00:00+02:00"
     assert set(OPTIONAL_TENDER_FIELDS).isdisjoint(tenders["B-18"])
+
+
+def test_attach_recovers_full_listing_null_field_and_missed_next_link():
+    entry = "https://portal.example/market"
+    listing = "https://portal.example/search?country=DE"
+    page_two = listing + "&page=2"
+    pages = {
+        entry: f'<a href="{listing}">View all tenders</a><article>Market highlights</article>',
+        listing: '<article data-id="1">School roof</article>'
+                 '<a aria-label="Next page" href="?country=DE&amp;page=2">→</a>',
+        page_two: '<article data-id="2">School desks</article>'
+                  '<a aria-label="Next page" aria-disabled="true" href="?page=3">→</a>',
+    }
+    proposals = []
+
+    class Model:
+        model_name = "fixture"
+
+        async def json(self, prompt, **kwargs):
+            evidence = json.loads(prompt)
+            if "entry" in evidence:
+                return {"list_url": entry}
+            url = evidence["list_page"]["url"]
+            proposals.append(url)
+            return {"list": {"url": url, "item": "//article", "next_page": "//a[@class='more']/@href"},
+                    "fields": {"id": "@data-id", "title": "text()", "placeOfPerformance.countryCode": None}}
+
+    async def attach_and_read():
+        fetcher = FakeFetcher(pages)
+        try:
+            fetch = fetcher.for_portal("fixture")
+            recipe = await learn_recipe(entry, fetch, Model())
+            assert recipe.list_.url == listing
+            assert "placeOfPerformance.countryCode" not in recipe.fields
+            assert [row.fields["id"] for row in await run_recipe(recipe, fetch)] == ["1", "2"]
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(attach_and_read())
+    assert proposals == [entry, listing]
