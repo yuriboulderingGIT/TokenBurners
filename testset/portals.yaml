@@ -1,0 +1,11 @@
+# Real test portals (owner: B2). See plan section 8.
+# Keep 3 extra portals in secret.yaml (gitignored, share privately) until H12.
+#
+# - name: example-de
+#   url: https://...
+#   country: DE
+#   software: "e.g. Cosinex, Healy Hudson, Subreport"
+#   kind: ssr            # ssr | spa_json | multi_step
+#   block: none          # none | login | captcha
+#   notes: ""
+portals: []

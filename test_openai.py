@@ -1,11 +1,20 @@
-"""Quick check that the OpenAI key works. Run: python test_openai.py"""
+"""Quick check that YOUR OpenAI key works. Run: python test_openai.py
 
-from src.llm import ask, ask_json
+Goes through brain/llm.py like the real system, so the call is logged with its cost.
+"""
 
-# 1. Plain text answer
-print("Text reply:", ask("Say hello to the TokenBurners team in one short sentence."))
+import asyncio
 
-# 2. JSON answer
-print("JSON reply:", ask_json('Give me a JSON object with keys "team" and "mood".'))
+from app.db import db
+from brain.llm import LLM
 
-print("OK - OpenAI works.")
+
+async def main() -> None:
+    llm = LLM(db, cache_dir=None).scoped(portal_id="key-check", run_id=None, purpose="check")
+    data = await llm.json('Give me a JSON object with keys "team" and "mood".')
+    print("JSON reply:", data)
+    print(f"Cost: ${llm.total_cost:.6f}")
+    print("OK - OpenAI works.")
+
+
+asyncio.run(main())

@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+venv
+.env
+data
+__pycache__
+*.pyc
+.pytest_cache
+tests
+testset
+mock_portal

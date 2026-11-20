@@ -20,3 +20,13 @@ Thumbs.db
 
 # Audio made by the test script
 audio/test_*.mp3
+
+# Watchtower runtime data (database, downloads, LLM cache)
+data/
+/data/
+
+# Secret test portals: share privately, never commit (plan section 8)
+testset/secret.yaml
+
+# Test cache
+.pytest_cache/

@@ -1,53 +1,42 @@
-# TokenBurners - MAIN Summit Hackathon 2026
+# Watchtower — TokenBurners · Patterno track · MAIN Hackathon 2026
 
-**One sentence:** A [user] does X and sees Y.
+<!-- OWNER: A2 (P11). One page for the judges. Fill in the TODOs with measured numbers. -->
 
-**What it does:** TBD
+Give Watchtower the address of a public-tender portal it has never seen. It delivers every
+open tender with its documents, notices when the portal stops delivering correctly, and
+repairs itself without any human help.
 
-**How it works:** input → OpenAI → ElevenLabs → output
+## How it works
 
-## Run it
+1. **Attach (LLM, once per portal):** explore the portal and write a *recipe*, i.e. XPaths
+   or a JSON API description, then test it on 3 tenders.
+2. **Read (no LLM):** plain code runs the recipe, cleans the fields and downloads documents.
+   Regular reads cost nothing.
+3. **Health check after every read.** Only a healthy read leads to `serving`.
+4. **Repair (LLM):** when checks fail, the portal goes to `healing`. The model rewrites the
+   recipe (max 3 tries) while the API keeps serving the last correct tenders.
+   If it can't be repaired, or a login or captcha blocks it, the portal goes to `failed`
+   with a reason in plain words.
 
-### Windows (PowerShell)
-
-```powershell
-python -m venv .venv
-.venv\Scripts\activate
-copy .env.example .env      # then open .env and paste your keys
-pip install -r requirements.txt
-python test_openai.py
-python test_voice.py
-streamlit run app.py
-```
-
-### Mac
+## Run
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-cp .env.example .env        # then open .env and paste your keys
-pip install -r requirements.txt
-python test_openai.py
-python test_voice.py
-streamlit run app.py
+docker build -t watchtower .
+docker run -p 8080:8080 -e OPENAI_API_KEY=... watchtower
 ```
 
-## Roles
+API and dashboard: http://localhost:8080
 
-| Role           | Owns                              |
-| -------------- | --------------------------------- |
-| Lead/PM        | Scope + pitch                     |
-| AI/backend     | `src/`                            |
-| Frontend       | `app.py`                          |
-| Research/pitch | Slides + video + submission       |
+## Environment variables
 
-## Git loop
+| Name | Required | Default | Meaning |
+|---|---|---|---|
+| `OPENAI_API_KEY` | yes | | OpenAI key (handed over at submission) |
+| `OPENAI_MODEL` | no | `gpt-5-mini` | Cheap model for attach |
+| `OPENAI_MODEL_STRONG` | no | `gpt-5` | Strong model for repair |
+| `LLM_BUDGET_USD` | no | `5` | Total model budget; calls stop beyond it |
+| `REFRESH_MINUTES` | no | `15` | How often each portal is re-read |
 
-```bash
-git pull
-git add .
-git commit -m "What I changed"
-git push
-```
+## Model cost per portal
 
-**Never commit `.env`.** It holds your API keys.
+TODO(A2): measured from the `llm_calls` table: attach $…, repair $…, regular read $0.

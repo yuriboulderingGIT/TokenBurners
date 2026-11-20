@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "kind": "html",
+  "list": {
+    "url": "http://localhost:8090/tenders",
+    "item": "//table[@id='results']//tr[td]",
+    "next_page": "//a[@rel='next']/@href",
+    "max_pages": 20
+  },
+  "detail": { "link": ".//a[1]/@href" },
+  "fields": {
+    "id": "//dt[contains(.,'Vergabenummer')]/following-sibling::dd[1]",
+    "title": "//h1",
+    "buyerName": "//dt[contains(.,'Auftraggeber')]/following-sibling::dd[1]",
+    "publicationDate": "//dt[contains(.,'Veröffentlicht')]/following-sibling::dd[1]",
+    "submissionDeadline": "//dt[contains(.,'Angebotsfrist')]/following-sibling::dd[1]",
+    "referenceNumber": "//dt[contains(.,'Aktenzeichen')]/following-sibling::dd[1]",
+    "cpvCodes": "//dt[contains(.,'CPV')]/following-sibling::dd[1]"
+  },
+  "documents": {
+    "link": "//a[contains(@href,'/download/')]/@href",
+    "steps": []
+  },
+  "locale": { "tz": "Europe/Berlin", "lang": "de", "country": "DE" },
+  "learned_by": "hand-written",
+  "learned_at": "2026-11-20T10:00:00+01:00"
+}
