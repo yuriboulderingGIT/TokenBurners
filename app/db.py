@@ -189,6 +189,13 @@ class DB:
             (now_iso(), result, cost_usd, run_id),
         )
 
+    def runs_close_orphans(self) -> None:
+        """At startup: runs left 'running' by a stopped container did not finish."""
+        self.execute(
+            "UPDATE runs SET finished_at = ?, result = 'failed', notes = notes || ? WHERE result IS NULL",
+            (now_iso(), f"[{now_iso()}] stopped: the container restarted during this run\n"),
+        )
+
     def runs_for(self, portal_id: str, limit: int = 200) -> list[sqlite3.Row]:
         return self.all(
             "SELECT * FROM runs WHERE portal_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?",

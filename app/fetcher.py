@@ -26,6 +26,7 @@ from app.config import HTTP_TIMEOUT, MIN_REQUEST_INTERVAL, USER_AGENT
 log = logging.getLogger("watchtower.fetcher")
 
 RETRY_STATUSES = {429, 500, 502, 503, 504}
+MAX_REDIRECTS = 10
 
 
 class PortalCancelled(Exception):
@@ -57,7 +58,7 @@ class Fetcher:
         self.min_interval = min_interval
         self.retries = retries
         self._client = httpx.AsyncClient(
-            follow_redirects=True,
+            follow_redirects=False,  # _send follows them, so every hop waits its turn
             timeout=timeout,
             transport=transport,
             headers={"User-Agent": USER_AGENT},
@@ -93,9 +94,8 @@ class Fetcher:
     async def get(self, portal_id: str, url: str, **kw) -> httpx.Response:
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
-            await self.wait_turn(portal_id, url)
             try:
-                response = await self._client.get(url, **kw)
+                response = await self._send(portal_id, self._client.build_request("GET", url, **kw))
                 if response.status_code not in RETRY_STATUSES or attempt == self.retries:
                     return response
                 last_error = httpx.HTTPStatusError(
@@ -112,10 +112,10 @@ class Fetcher:
         self, portal_id: str, url: str, max_bytes: int, dest_dir: Path | None = None
     ) -> Downloaded | TooLarge:
         """Download to a file without holding it in memory. Stops past max_bytes."""
-        await self.wait_turn(portal_id, url)
         dest_dir = dest_dir or Path(tempfile.gettempdir())
         dest_dir.mkdir(parents=True, exist_ok=True)
-        async with self._client.stream("GET", url) as response:
+        response = await self._send(portal_id, self._client.build_request("GET", url), stream=True)
+        try:
             response.raise_for_status()
             length = response.headers.get("content-length")
             if length and length.isdigit() and int(length) > max_bytes:
@@ -126,6 +126,10 @@ class Fetcher:
                 path = Path(out.name)
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
+                    if portal_id in self._cancelled:  # DELETE must stop a long download within 1 min
+                        out.close()
+                        path.unlink(missing_ok=True)
+                        raise PortalCancelled(portal_id)
                     if size > max_bytes:
                         out.close()
                         path.unlink(missing_ok=True)
@@ -133,6 +137,19 @@ class Fetcher:
                     digest.update(chunk)
                     out.write(chunk)
             return Downloaded(path, size, digest.hexdigest(), _filename(response))
+        finally:
+            await response.aclose()
+
+    async def _send(self, portal_id: str, request: httpx.Request, stream: bool = False) -> httpx.Response:
+        """Send one request, following redirects by hand: each hop is a request and waits its turn."""
+        for _ in range(MAX_REDIRECTS + 1):
+            await self.wait_turn(portal_id, str(request.url))
+            response = await self._client.send(request, stream=stream)
+            if response.next_request is None:
+                return response
+            await response.aclose()
+            request = response.next_request
+        raise httpx.TooManyRedirects(f"more than {MAX_REDIRECTS} redirects", request=request)
 
     async def aclose(self) -> None:
         await self._client.aclose()

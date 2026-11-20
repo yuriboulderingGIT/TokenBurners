@@ -43,6 +43,7 @@ class Worker:
         for _ in range(WORKER_CONCURRENCY):
             self._tasks.append(asyncio.create_task(self._consume()))
         self._tasks.append(asyncio.create_task(self._scheduler()))
+        self.db.runs_close_orphans()
         # Resume portals that were mid-attach when the container stopped.
         for portal in self.db.portal_list():
             if portal["state"] in (states.INTEGRATING, states.HEALING):
