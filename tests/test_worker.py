@@ -171,12 +171,15 @@ def test_refresh_during_repair_and_reread_returns_the_live_run(monkeypatch) -> N
     portal_id = _serving_portal("https://portal.example/repair-live-run")
     seen: list[str] = []
     calls = 0
+    previous_version = db.recipe_latest(portal_id).version
 
     async def fake_run_recipe(recipe, fetch):
         nonlocal calls
         calls += 1
         if calls == 2:  # the re-read after the repair
             seen.append(worker.request_read(portal_id))
+            assert db.recipe_latest(portal_id).version == previous_version
+            assert db.one("SELECT result FROM runs WHERE id = ?", (seen[0],))["result"] is None
             raise RuntimeError("connection reset")  # not a recipe problem
         return []
 
@@ -195,6 +198,8 @@ def test_refresh_during_repair_and_reread_returns_the_live_run(monkeypatch) -> N
     portal = db.portal_get(portal_id)
     assert portal["state"] == states.FAILED
     assert portal["reason"].startswith("re-read after repair failed")
+    assert db.recipe_latest(portal_id).version == previous_version
+    assert db.one("SELECT result FROM runs WHERE id = ?", (seen[0],))["result"] == "failed"
     assert portal_id not in worker.active
     assert worker.queue.qsize() == 0  # refreshes during the run queued nothing extra
 

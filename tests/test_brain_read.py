@@ -145,6 +145,28 @@ def test_head_next_link_and_disabled_final_page_control() -> None:
         asyncio.run(_read(recipe, pages))
 
 
+@pytest.mark.parametrize("next_relation", ["", ' rel="next"'])
+def test_declared_last_page_ignores_only_a_nonsemantic_forward_control(next_relation):
+    url = f"{_MOCK_ORIGIN}/tenders"
+    recipe = Recipe.model_validate({
+        "list": {"url": url, "item": "//li", "next_page": "//a[@class='forward']/@href"},
+        "fields": {"id": "text()"},
+    })
+    pages = {
+        url: '<li>A</li><a rel="last" href="?start=10">2</a><a class="forward" href="?start=10">→</a>',
+        url + "?start=10": (
+            '<li>B</li><a rel="last" href="?start=10">2</a>'
+            f'<a class="forward" href="?start=20"{next_relation}>→</a>'
+        ),
+        url + "?start=20": "<ol></ol>",
+    }
+    if next_relation:
+        with pytest.raises(RecipeReadError, match="no tenders on page 3"):
+            asyncio.run(_read(recipe, pages))
+    else:
+        assert [row.fields["id"] for row in asyncio.run(_read(recipe, pages))] == ["A", "B"]
+
+
 @pytest.mark.parametrize("control", [
     '<a href="?page=2">Next</a>',
     '<a href="?seite=2">Weiter »</a>',
@@ -192,6 +214,22 @@ def test_active_postback_pager_cannot_serve_only_its_first_page():
         asyncio.run(_read(recipe, {url: "<li>A</li>" + button}))
     last = button.replace("<button ", "<button disabled ")
     assert len(asyncio.run(_read(recipe, {url: "<li>A</li>" + last}))) == 1
+
+
+def test_public_get_pager_replays_the_published_hidden_fields_and_next_button():
+    url = f"{_MOCK_ORIGIN}/tenders"
+    pager = """<form action="/results" method="get">
+      <input type="hidden" name="state" value="some/value">
+      <button type="submit" name="pageNum" value="1">Next page</button>
+    </form>"""
+    recipe = Recipe.model_validate({"list": {"url": url, "item": "//li"}, "fields": {"id": "text()"}})
+    pages = {url: "<li>A</li>" + pager, f"{_MOCK_ORIGIN}/results?state=some%2Fvalue&pageNum=1": "<li>B</li>"}
+    assert [row.fields["id"] for row in asyncio.run(_read(recipe, pages))] == ["A", "B"]
+    for unsafe in (pager.replace('method="get"', 'method="post"'),
+                   pager.replace('action="/results"', 'action="https://unrelated.example/results"'),
+                   pager.replace('<button', '<button formaction="/other"')):
+        with pytest.raises(RecipeReadError, match="next page control provides no public HTTP link"):
+            asyncio.run(_read(recipe, {url: "<li>A</li>" + unsafe}))
 
 
 @pytest.mark.parametrize("metadata", [{"total_count": 4}, {"pagination": {"totalCount": "4"}}])
@@ -326,6 +364,7 @@ def test_captcha_page_is_reported_as_blocked() -> None:
 
 @pytest.mark.parametrize(("value", "locale", "expected"), [
     ("09.12.2026, 10:00 Uhr", Locale(lang="de", tz="Europe/Berlin"), "2026-12-09T10:00:00+01:00"),
+    ("30.11.2026, 10:00h", Locale(lang="de", tz="Europe/Berlin"), "2026-11-30T10:00:00+01:00"),
     ("9 décembre 2026, 10h30", Locale(lang="fr", tz="Europe/Paris"), "2026-12-09T10:30:00+01:00"),
     ("9 de diciembre de 2026, 10:00", Locale(lang="es", tz="Europe/Madrid"), "2026-12-09T10:00:00+01:00"),
     ("12/09/2026, 10:00 AM", Locale(lang="en-US", tz="America/New_York"), "2026-12-09T10:00:00-05:00"),
@@ -377,7 +416,7 @@ def test_cyprus_list_only_recipe_preserves_notice_links():
         "list": {"url": url, "item": "//table/tbody/tr"},
         "fields": {"id": "normalize-space(td[3])", "title": "normalize-space(td[2]/a)"},
     })
-    rows = asyncio.run(_read(recipe, {url: fixture.read_text()}))
+    rows = asyncio.run(_read(recipe, {url: fixture.read_text(encoding="utf-8")}))
     assert len(rows) == 5
     for row in rows:
         assert row.url == "https://www.eprocurement.gov.cy/epps/cft/prepareViewCfTWS.do?resourceId=" + row.fields["id"]

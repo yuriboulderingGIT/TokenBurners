@@ -32,6 +32,12 @@ For a first test, open the Masaryk University listing in a private browser windo
 3. Look for a reference number and title on individual notices. If there are multiple pages, check whether **Next** has a link you can copy and reopen. A small buyer listing with public detail links is easier to verify than a national search with hundreds of pages. Watchtower checks up to 100 pages.
 4. Paste the listing address into the dashboard. If the read fails, open the portal’s history. HTTP 403 means the site refused Watchtower’s request. A CAPTCHA requires human interaction. For either outcome, look for another public listing published by the buyer. JavaScript listings need an anonymous JSON feed Watchtower can read. An OpenAI client startup error points to the running container’s key configuration and can affect any new portal.
 
+If a site opens on a search form, Watchtower can use the empty results URL from a public
+GET search that accepts a blank keyword. It also follows supported GET pagination controls.
+If the site requires a keyword, run your search first and paste its shareable results URL.
+Watchtower monitors that result set. Tender counts and downloaded document counts are
+reported separately because some portals make their notices public but restrict their files.
+
 ## Settings
 
 | Environment variable | Default | Use |

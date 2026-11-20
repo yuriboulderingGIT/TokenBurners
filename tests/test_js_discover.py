@@ -2,16 +2,19 @@
 
 import asyncio
 import json
-import os
+import sys
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import httpx
 import pytest
-from playwright.async_api import async_playwright
+from playwright.async_api import Error, async_playwright
 
 from app.fetcher import FakeFetcher, Fetcher
 from app.models import Health, Recipe
 from brain import js_discover
 from brain.js_discover import discover_json_api
+from brain.learn import AttachFailed, learn_recipe
 from brain.repair import repair
 from brain.run_recipe import run_recipe
 
@@ -35,8 +38,64 @@ class FixtureFetcher(FakeFetcher):
 
 async def require_chromium():
     async with async_playwright() as playwright:
-        if not os.path.isfile(playwright.chromium.executable_path):
-            pytest.skip("Playwright Chromium is not installed")
+        try:
+            browser = await playwright.chromium.launch()
+        except Error as exc:
+            if "Executable doesn't exist" in str(exc):
+                pytest.skip("Playwright Chromium is not installed")
+            raise
+        await browser.close()
+
+
+@pytest.mark.parametrize(("stage", "error", "reason"), [
+    ("startup", PermissionError(), "could not start Playwright for browser discovery"),
+    ("launch", Error("Executable doesn't exist at /browser"), "python -m playwright install chromium"),
+    ("launch", Error("Access is denied"), "could not launch Chromium for browser discovery"),
+])
+def test_attach_reports_browser_runtime_failure(monkeypatch, stage, error, reason):
+    @asynccontextmanager
+    async def broken_playwright():
+        if stage == "startup":
+            raise error
+
+        async def launch():
+            raise error
+
+        yield SimpleNamespace(chromium=SimpleNamespace(launch=launch))
+
+    monkeypatch.setattr(js_discover, "async_playwright", broken_playwright)
+
+    async def exercise():
+        url = f"{BASE}/tenders"
+        fetcher = FakeFetcher({url: '<html><body><script src="/bundle.js"></script></body></html>'})
+        try:
+            with pytest.raises(AttachFailed, match=reason):
+                await learn_recipe(url, fetcher.for_portal("fixture"), None)
+            assert [requested for _, _, requested in fetcher.request_log] == [url]
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Selector loop cannot launch subprocesses")
+def test_windows_selector_loop_errors_before_starting_playwright(monkeypatch):
+    def unexpected_playwright():
+        pytest.fail("Playwright should only start with Windows subprocess support")
+
+    monkeypatch.setattr(js_discover, "async_playwright", unexpected_playwright)
+
+    async def exercise():
+        url = f"{BASE}/tenders"
+        fetcher = FakeFetcher({url: '<html><body><script src="/bundle.js"></script></body></html>'})
+        try:
+            with pytest.raises(AttachFailed, match="run Uvicorn without --reload"):
+                await learn_recipe(url, fetcher.for_portal("fixture"), None)
+        finally:
+            await fetcher.aclose()
+
+    with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+        runner.run(exercise())
 
 
 def test_discover_and_replay_public_json_feed_after_config_responses(monkeypatch):
@@ -162,6 +221,43 @@ def test_repair_rediscovers_moved_json_feed_from_original_entry(monkeypatch, red
             assert candidate.list_.url == new_url
             prefix = [original_url, entry_url] if redirected else []
             assert [url for _, _, url in fetcher.request_log] == prefix + [entry_url, new_url, new_url]
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("via_browser", [False, True])
+def test_repair_can_replace_html_with_a_public_json_recipe(monkeypatch, via_browser):
+    monkeypatch.setattr(js_discover, "_EXTRA_CAPTURE_SECONDS", 0.05)
+    monkeypatch.setattr(js_discover, "_JSON_WAIT_SECONDS", 3)
+    url = f"{BASE}/tenders"
+    feed_url = f"{BASE}/api/tenders" if via_browser else url
+    payload = json.dumps({"items": [{"id": "REF-1", "title": "Library repairs"}]})
+    old = Recipe.model_validate({"list": {"url": url, "item": "//article"}})
+
+    class Model:
+        strong_model_name = "fixture-repair"
+
+        async def json(self, prompt, *, system, strong):
+            evidence = json.loads(prompt)
+            assert strong and "Library repairs" in evidence["endpoints"][0]["sample"]
+            return {"endpoint": 0, "recipe": {
+                "list": {"item": "$.items[*]"}, "fields": {"id": "$.id", "title": "$.title"},
+            }}
+
+    async def exercise():
+        pages = {feed_url: payload}
+        if via_browser:
+            await require_chromium()
+            pages[url] = "<html><body><script>fetch('/api/tenders')</script></body></html>"
+        fetcher = FixtureFetcher(pages)
+        try:
+            scoped = fetcher.for_portal("fixture")
+            candidate = await repair(old, Health(ok=False, problems=["no list entries"]), scoped, Model())
+            assert candidate is not None and candidate.kind == "json_api"
+            assert candidate.list_.url == feed_url
+            assert [row.fields["id"] for row in await run_recipe(candidate, scoped)] == ["REF-1"]
         finally:
             await fetcher.aclose()
 

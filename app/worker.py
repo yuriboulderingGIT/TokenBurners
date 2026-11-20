@@ -131,7 +131,7 @@ class Worker:
         try:
             portal = self.db.portal_get(portal_id)
             retry = portal is not None and portal["state"] == states.FAILED
-            if retry:
+            if retry and portal["recipe_version"] is not None:
                 self.db.run_note(run_id, "retry of a failed portal: plain read, no repair")
             await self._read(portal_id, run_id, allow_repair=not retry, retry=retry)
         except Exception as e:  # never let one portal kill the worker
@@ -142,13 +142,16 @@ class Worker:
 
     # ----- pipeline -----
 
-    async def _read(self, portal_id: str, run_id: str, allow_repair: bool, retry: bool = False) -> None:
+    async def _read(
+        self, portal_id: str, run_id: str, allow_repair: bool, retry: bool = False, *,
+        repaired_recipe: Recipe | None = None, repair_cost_usd: float = 0.0,
+    ) -> bool:
         portal = self.db.portal_get(portal_id)
         if portal is None:
             self.db.run_finish(run_id, "failed", "portal was deleted")
-            return
+            return False
         fetch = self.fetcher.for_portal(portal_id)
-        recipe = self.db.recipe_latest(portal_id)
+        recipe = repaired_recipe if repaired_recipe is not None else self.db.recipe_latest(portal_id)
         cost = 0.0
         try:
             if recipe is None:
@@ -176,10 +179,15 @@ class Worker:
                 health = check_health(self._previous(portal_id), result)
                 self.db.run_note(run_id, f"read {result.raw_count} list entries, {len(result.tenders)} tenders")
                 if health.ok:
-                    count = self.db.save_tenders(portal_id, result.tenders)
-                    states.set_state(self.db, portal_id, states.SERVING, f"delivering {count} tenders", run_id)
+                    count = self.db.save_tenders(
+                        portal_id, result.tenders, repaired_recipe=repaired_recipe, repair_cost_usd=repair_cost_usd,
+                    )
+                    files = sum(len(tender.documents) for tender in result.tenders)
+                    file_label = "document" if files == 1 else "documents"
+                    reason = f"delivering {count} tenders. Latest read verified {files} {file_label}"
+                    states.set_state(self.db, portal_id, states.SERVING, reason, run_id)
                     self.db.run_finish(run_id, "ok", cost_usd=cost)
-                    return
+                    return True
 
             problems = "; ".join(health.problems)
             self.db.run_finish(run_id, "failed", f"health check failed: {problems}", cost)
@@ -208,12 +216,12 @@ class Worker:
         except Exception as e:
             log.exception("read %s failed", run_id)
             # No repair and no retry = the re-read right after a repair (see "repaired recipe still fails").
-            after_repair = not (allow_repair or retry)
             self._keep_last_good(
-                portal_id, run_id, f"read failed: {type(e).__name__}: {e}", after_repair,
+                portal_id, run_id, f"read failed: {type(e).__name__}: {e}", repaired_recipe is not None,
                 portal_hiccup=isinstance(e, httpx.HTTPError),
             )
             self.db.run_finish(run_id, "failed", cost_usd=cost)
+        return False
 
     async def _execute(self, portal_id: str, recipe: Recipe, fetch: PortalFetcher) -> ReadResult:
         raws = await run_recipe(recipe, fetch)
@@ -279,11 +287,15 @@ class Worker:
             self.db.run_finish(repair_run, "failed", "repair gave up", llm.total_cost)
             states.set_state(self.db, portal_id, states.FAILED, f"repair gave up after: {problems}")
             return
-        version = self.db.recipe_save(portal_id, new_recipe, "repair", llm.total_cost)
-        self.db.run_finish(repair_run, "ok", f"recipe v{version} written", llm.total_cost)
         reread = self.db.run_create(portal_id, "read")
         self.active[portal_id] = reread
-        await self._read(portal_id, reread, allow_repair=False)
+        self.db.run_note(repair_run, "checking the replacement recipe on a full read")
+        if await self._read(
+            portal_id, reread, allow_repair=False, repaired_recipe=new_recipe, repair_cost_usd=llm.total_cost,
+        ):
+            self.db.run_finish(repair_run, "ok", f"recipe v{new_recipe.version} verified", llm.total_cost)
+        else:
+            self.db.run_finish(repair_run, "failed", "replacement recipe failed its full read", llm.total_cost)
 
     def _previous(self, portal_id: str) -> ReadResult | None:
         """What the last healthy read saw. Tenders kept as closed after they left the list don't count."""

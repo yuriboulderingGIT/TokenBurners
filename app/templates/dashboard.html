@@ -14,7 +14,7 @@
   </div>
 
   <section class="kpis" aria-label="Summary">
-    <div class="kpi serving"><div class="label"><i class="dot"></i>Serving</div><div class="value">{{ counts.serving }}</div><div class="sub">delivering correctly</div></div>
+    <div class="kpi serving"><div class="label"><i class="dot"></i>Serving</div><div class="value">{{ counts.serving }}</div><div class="sub">tenders available</div></div>
     <div class="kpi healing {{ 'alert' if counts.healing }}"><div class="label"><i class="dot"></i>Healing</div><div class="value">{{ counts.healing + counts.integrating }}</div><div class="sub">{{ counts.integrating }} being learned, {{ counts.healing }} repairing</div></div>
     <div class="kpi failed {{ 'alert' if counts.failed }}"><div class="label"><i class="dot"></i>Failed</div><div class="value">{{ counts.failed }}</div><div class="sub">need a person</div></div>
     <div class="kpi"><div class="label">Tenders delivered</div><div class="value">{{ tenders }}</div><div class="sub">across {{ total }} portal{{ "s" if total != 1 }}</div></div>
@@ -50,7 +50,7 @@
           <td>
             <div class="host" title="{{ p.url }}"><a href="/ui/portals/{{ p.id }}">{{ parts[2] if parts|length > 2 else p.url }}</a></div>
             <div class="path">{{ "/" ~ parts[3] if parts|length > 3 else "" }}</div>
-            {% if p.reason and not p.reason.startswith("delivering") %}<div class="reason">{{ p.reason }}</div>{% endif %}
+            {% if p.reason %}<div class="reason">{{ p.reason }}</div>{% endif %}
             <div class="rowlinks"><a href="/ui/portals/{{ p.id }}">tenders, documents and runs →</a></div>
           </td>
           <td class="num">{{ p.tender_count }}</td>

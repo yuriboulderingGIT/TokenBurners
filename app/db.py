@@ -263,17 +263,23 @@ class DB:
 
     def recipe_save(self, portal_id: str, recipe: Recipe, created_by: str, cost_usd: float) -> int:
         with self.transaction() as conn:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(version), 0) AS v FROM recipes WHERE portal_id = ?", (portal_id,)
-            ).fetchone()
-            version = row["v"] + 1
-            recipe.version = version
-            conn.execute(
-                "INSERT INTO recipes (portal_id, version, json, created_at, created_by, model_cost_usd) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (portal_id, version, recipe.to_json(), now_iso(), created_by, cost_usd),
-            )
-            conn.execute("UPDATE portals SET recipe_version = ? WHERE id = ?", (version, portal_id))
+            return self._insert_recipe(conn, portal_id, recipe, created_by, cost_usd)
+
+    @staticmethod
+    def _insert_recipe(
+        conn: sqlite3.Connection, portal_id: str, recipe: Recipe, created_by: str, cost_usd: float,
+    ) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) AS v FROM recipes WHERE portal_id = ?", (portal_id,)
+        ).fetchone()
+        version = row["v"] + 1
+        recipe.version = version
+        conn.execute(
+            "INSERT INTO recipes (portal_id, version, json, created_at, created_by, model_cost_usd) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (portal_id, version, recipe.to_json(), now_iso(), created_by, cost_usd),
+        )
+        conn.execute("UPDATE portals SET recipe_version = ? WHERE id = ?", (version, portal_id))
         return version
 
     def recipe_history(self) -> dict[str, list[sqlite3.Row]]:
@@ -300,7 +306,10 @@ class DB:
         )
         return [json.loads(r["json"]) for r in rows]
 
-    def save_tenders(self, portal_id: str, tenders: list[Tender]) -> int:
+    def save_tenders(
+        self, portal_id: str, tenders: list[Tender], *,
+        repaired_recipe: Recipe | None = None, repair_cost_usd: float = 0.0,
+    ) -> int:
         """Store a healthy read. Changed tenders get a new lastChangedAt.
 
         Tenders that are no longer listed are kept and marked closed (plan section 9).
@@ -327,6 +336,8 @@ class DB:
                 "SELECT COUNT(*) AS n FROM tenders WHERE portal_id = ?", (portal_id,)
             ).fetchone()["n"]
             conn.execute("UPDATE portals SET tender_count = ? WHERE id = ?", (count, portal_id))
+            if repaired_recipe is not None:
+                self._insert_recipe(conn, portal_id, repaired_recipe, "repair", repair_cost_usd)
         return count
 
     @staticmethod
