@@ -82,12 +82,13 @@ def test_worker_keeps_previous_tenders_and_repairs_only_recipe_failures(
             )
         return httpx.Response(200, text=page)
 
-    async def fake_repair(old, health, _fetch, _llm, *, portal_url, pagination_page):
+    async def fake_repair(old, health, _fetch, _llm, *, portal_url, pagination_page, stored_tenders):
         assert problem in health.problems[0]
         assert portal_url == _ENTRY
         assert old.list_.url == _OLD_LIST
         assert db.portal_get(portal_id)["state"] == "healing"
         assert db.tenders_for(portal_id) == baseline
+        assert [tender.id for tender in stored_tenders] == ["A", "B"]
         if fault == "pager":
             assert pagination_page["url"] == _OLD_LIST
         repaired.append(True)

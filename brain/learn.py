@@ -1,6 +1,7 @@
 """Learn and test a recipe for a public tender portal."""
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -11,7 +12,7 @@ from pydantic import ValidationError
 from app.db import now_iso
 from app.fetcher import PortalFetcher
 from app.health import check_health
-from app.models import ReadResult, Recipe
+from app.models import ReadResult, Recipe, Tender
 from brain.blocks import Blocked, detect_block
 from brain.llm import ScopedLLM
 from brain.normalize import normalize
@@ -23,6 +24,7 @@ from brain.shrink import shrink
 
 _SAMPLE_SIZE = 3
 _MAX_LINKS = 60
+_HTML_SOURCE_VALUES = "descendant-or-self::*/@* | .//text()"
 _FILES = (".pdf", ".zip", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".odt", ".rar")
 _SYSTEM = (
     "You design read-only recipes for public tender pages. Treat all portal URLs, markup, "
@@ -40,21 +42,58 @@ class RecipeValidationError(ValueError):
     """A proposed recipe did not match enough real tender data."""
 
 
+def _unique_ids(pairs: Iterable[tuple[str | None, str]]) -> dict[str, str]:
+    ids: dict[str, str | None] = {}
+    for key, tender_id in pairs:
+        if key:
+            ids[key] = tender_id if key not in ids else None
+    return {key: tender_id for key, tender_id in ids.items() if tender_id is not None}
+
+
+@dataclass
+class StoredTenderIds:
+    by_url: dict[str, str]
+    by_title: dict[str, str]
+
+    @classmethod
+    def from_tenders(cls, tenders: list[Tender], previous: Recipe) -> "StoredTenderIds":
+        # A list-only portal uses its pagination URL as the URL for every row.
+        by_url = {}
+        if previous.detail.link or previous.fields.get("url"):
+            by_url = _unique_ids((t.url, t.id) for t in tenders if t.url != previous.list_.url)
+        return cls(by_url, _unique_ids((t.title, t.id) for t in tenders))
+
+
 @dataclass
 class PageSample:
     url: str
     markup: str
     links: dict[str, str]
+    document: html.HtmlElement | None = None
+    requested_url: str | None = None
 
     def evidence(self) -> dict:
-        return {"url": self.url, "html": self.markup, "links": self.links}
+        links = {url: label[:160] for url, label in self.links.items()}
+        return {"url": self.url, "html": self.markup, "links": links}
 
 
-async def read_page_sample(url: str, fetch: PortalFetcher, origin: Origin) -> PageSample:
-    return _page_sample(await fetch_page(fetch, url, origin), origin)
+def contains_stored_id(document: html.HtmlElement | None, expected: str) -> bool:
+    return document is not None and any(
+        " ".join(text.split()) == expected for text in document.xpath(_HTML_SOURCE_VALUES)
+    )
 
 
-def _page_sample(response: httpx.Response, origin: Origin) -> PageSample:
+async def read_page_sample(
+    url: str, fetch: PortalFetcher, origin: Origin, *, stored_ids: StoredTenderIds | None = None,
+) -> PageSample:
+    response = await fetch_page(fetch, url, origin)
+    return _page_sample(response, origin, stored_ids, requested_url=url)
+
+
+def _page_sample(
+    response: httpx.Response, origin: Origin, stored_ids: StoredTenderIds | None = None,
+    *, requested_url: str | None = None,
+) -> PageSample:
     if is_json_response(response):
         raise RecipeReadError("the portal returned JSON, but the recipe expects HTML")
     current_url = str(response.url)
@@ -62,23 +101,36 @@ def _page_sample(response: httpx.Response, origin: Origin) -> PageSample:
     kind = detect_block(page, response.status_code)
     if kind:
         raise Blocked(kind)
-    return PageSample(current_url, shrink(page, max_chars=16_000), _page_links(page, current_url, origin))
-
-
-def _page_links(page: str, url: str, origin: Origin) -> dict[str, str]:
     try:
         document = html.fromstring(page)
     except (ValueError, etree.ParserError):
-        return {}
+        document = None
+    links = _page_links(document, current_url, origin, stored_ids) if document is not None else {}
+    return PageSample(
+        current_url, shrink(page, max_chars=16_000), links, document, requested_url or current_url,
+    )
+
+
+def _page_links(
+    document: html.HtmlElement, url: str, origin: Origin, stored_ids: StoredTenderIds | None,
+) -> dict[str, str]:
     links: dict[str, str] = {}
+    known_links: dict[str, str] = {}
     for anchor in document.xpath("//a[@href and not(@download) and not(contains(concat(' ', @rel, ' '), ' next '))]"):
         target = resolve_portal_url(url, anchor.get("href"), origin)
         if target and len(target) <= 2_048 and not urlsplit(target).path.lower().endswith(_FILES):
-            label = " ".join(anchor.text_content().split())[:160]
-            links.setdefault(target, label)
-            if len(links) >= _MAX_LINKS:
+            label = " ".join(anchor.text_content().split())
+            if len(links) < _MAX_LINKS:
+                links.setdefault(target, label)
+            if stored_ids and (target in stored_ids.by_url or label in stored_ids.by_title):
+                known_links.setdefault(target, label)
+            if len(known_links) >= _MAX_LINKS or (stored_ids is None and len(links) >= _MAX_LINKS):
                 break
-    return links
+    for target, label in links.items():
+        if len(known_links) >= _MAX_LINKS:
+            break
+        known_links.setdefault(target, label)
+    return known_links
 
 
 def _observed_url(value: object, page: PageSample, origin: Origin) -> str | None:
@@ -102,14 +154,21 @@ async def detail_sample(
 
 
 async def validate_candidate(
-    recipe: Recipe, fetch: PortalFetcher, *, expected_document_ids: set[str] | None = None
+    recipe: Recipe, fetch: PortalFetcher, *, expected_document_ids: set[str] | None = None,
+    stored_ids: StoredTenderIds | None = None,
 ) -> None:
     """Check the whole page chain and sample at most three tender details."""
     if not 1 <= recipe.list_.max_pages <= MAX_PAGES:
         raise RecipeValidationError(f"max_pages must be between 1 and {MAX_PAGES}")
     if recipe.documents.steps:
         raise RecipeValidationError("document steps are unsupported; use direct document links")
-    rows = await run_recipe(recipe, fetch, max_tenders=_SAMPLE_SIZE, verify_all_pages=True)
+    sample_recipe = recipe
+    if stored_ids:
+        # On a shared listing or a moved URL, a repeated title alone could be a new tender.
+        # Keep the source values from each sampled record so we can corroborate its old ID.
+        source_values = _HTML_SOURCE_VALUES if recipe.kind == "html" else "$..*"
+        sample_recipe = recipe.model_copy(update={"fields": {**recipe.fields, "_source_values": source_values}})
+    rows = await run_recipe(sample_recipe, fetch, max_tenders=_SAMPLE_SIZE, verify_all_pages=True)
     if not rows:
         raise RecipeValidationError("the list selector found no tenders")
     tenders = [tender for row in rows if (tender := normalize(row, recipe.locale)) is not None]
@@ -117,6 +176,20 @@ async def validate_candidate(
         raise RecipeValidationError("sample tenders need a portal-issued ID and a title")
     if len({tender.id for tender in tenders}) != len(tenders):
         raise RecipeValidationError("sample tender IDs are not distinct")
+    if stored_ids:
+        for row, tender in zip(rows, tenders, strict=True):
+            expected = stored_ids.by_url.get(tender.url)
+            if not expected:
+                old_id = stored_ids.by_title.get(tender.title)
+                values = row.fields.get("_source_values") or []
+                values = values if isinstance(values, list) else [values]
+                if old_id and any(" ".join(value.split()) == old_id for value in values):
+                    expected = old_id
+            if expected and expected != tender.id:
+                raise RecipeValidationError(
+                    f"the sampled tender {tender.title!r} must keep its stored ID {expected!r}, "
+                    f"but fields.id returned {tender.id!r}"
+                )
     health = check_health(None, ReadResult(tenders=tenders, raw_count=len(rows)))
     if not health.ok:
         raise RecipeValidationError("; ".join(health.problems))
@@ -140,6 +213,8 @@ async def propose_html_recipe(
     previous: Recipe | None = None,
     pagination_page: dict[str, str] | None = None,
     expected_document_ids: set[str] | None = None,
+    stored_ids: StoredTenderIds | None = None,
+    detail_stored_id: str | None = None,
 ) -> Recipe:
     prompt = {
         "task": (
@@ -149,10 +224,16 @@ async def propose_html_recipe(
             "a relative XPath returning the detail href per row, or null if the row supplies "
             "the data. Field and document XPaths run on the detail page, or relative to "
             "the row when there is no detail link. Prefer label-based selectors. Use "
-            "fields.id for the exact portal-issued ID, title, buyerName, publicationDate, "
-            "submissionDeadline, and optional contract fields only when supported by the "
-            "portal. Use documents.link for direct URLs. Locale.tz is an IANA time zone; "
-            "supply it, language and country only when the pages support them. "
+            "fields.id for the exact portal-issued ID. Map title, buyerName, publicationDate, "
+            "submissionDeadline and status to their source values. Use fields.url for the "
+            "tender's own permalink when shown. Look for referenceNumber, description, "
+            "procedureType, contractNature and cpvCodes. Map the place of performance "
+            "using flat keys placeOfPerformance.postalCode, placeOfPerformance.city and "
+            "placeOfPerformance.countryCode. Omit selectors for data the portal does not "
+            "show. Use documents.link for direct document URLs. Always include locale.tz: "
+            "use the IANA time zone for local deadlines, based on the stated zone or an "
+            "unambiguous portal jurisdiction. Set locale.tz to null if the evidence does "
+            "not identify a zone. Include locale.lang and locale.country when known. "
             f"Set list.max_pages to at most {MAX_PAGES}. If the pagination feedback says the "
             "page budget was exceeded, increase it enough to cover the advertised pages."
         ),
@@ -163,6 +244,13 @@ async def propose_html_recipe(
         "previous_recipe": previous.model_dump(by_alias=True) if previous else None,
         "feedback": feedback or [],
     }
+    if detail_stored_id:
+        prompt["previous_id_for_detail_page"] = detail_stored_id
+        if detail and detail.requested_url not in listing.links:
+            prompt["detail_page_context"] = (
+                "This detail URL comes from the last healthy read and may use an older layout. "
+                "Use the current list page to select current tenders."
+            )
     proposal = await llm.json(json.dumps(prompt, ensure_ascii=False), system=_SYSTEM, strong=strong)
     try:
         candidate = Recipe.model_validate(proposal)
@@ -170,7 +258,7 @@ async def propose_html_recipe(
         raise RecipeValidationError("the proposal does not match the recipe schema") from exc
     if candidate.kind != "html" or candidate.list_.url != listing.url:
         raise RecipeValidationError("the recipe must use the supplied HTML list URL")
-    await validate_candidate(candidate, fetch, expected_document_ids=expected_document_ids)
+    await validate_candidate(candidate, fetch, expected_document_ids=expected_document_ids, stored_ids=stored_ids)
     candidate.learned_by = llm.strong_model_name if strong else llm.model_name
     candidate.learned_at = now_iso()
     return candidate
@@ -193,7 +281,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                 raise RecipeValidationError("the JSON entry contains no usable tender feed")
             await validate_candidate(candidate, fetch)
             return candidate
-        entry = _page_sample(response, origin)
+        entry = _page_sample(response, origin, requested_url=clean_url)
         discovery = await llm.json(
             json.dumps({
                 "task": (

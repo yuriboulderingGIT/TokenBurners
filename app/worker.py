@@ -223,8 +223,10 @@ class Worker:
         states.set_state(self.db, portal_id, states.HEALING, f"repairing after: {problems}", repair_run)
         llm = self.llm.scoped(portal_id, repair_run, "repair")
         try:
+            previous = self._previous(portal_id)
             new_recipe = await repair(
-                recipe, health, fetch, llm, portal_url=portal_url, pagination_page=pagination_page
+                recipe, health, fetch, llm, portal_url=portal_url, pagination_page=pagination_page,
+                stored_tenders=previous.tenders if previous else None,
             )
         except (BudgetExceeded, LLMUnavailable) as e:
             self.db.run_finish(repair_run, "failed", str(e), llm.total_cost)
