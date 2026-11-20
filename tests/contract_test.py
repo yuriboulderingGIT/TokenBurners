@@ -50,6 +50,8 @@ def test_contract() -> None:
         assert set(portal) == PORTAL_KEYS
         assert portal["state"] in STATES
         assert isinstance(portal["tenderCount"], int)
+        if portal["lastSuccessAt"] is not None:
+            assert has_offset(portal["lastSuccessAt"])
 
         # GET /portals: a list in the same shape
         r = client.get("/portals")
@@ -98,6 +100,8 @@ def test_contract() -> None:
             assert run["kind"] in {"read", "repair"}
             assert run["result"] in {"ok", "failed", None}
             assert has_offset(run["startedAt"])
+            if run["finishedAt"] is not None:
+                assert has_offset(run["finishedAt"])
 
         # Dashboard
         r = client.get("/")
