@@ -27,6 +27,7 @@ _LOGIN_HEADING = re.compile(
 _ANCILLARY = re.compile(r"<(header|nav|aside|footer)\b[^>]*>.*?</\1\s*>", re.I | re.S)
 _FORM = re.compile(r"<form\b[^>]*>.*?</form\s*>", re.I | re.S)
 _PUBLIC_CONTENT = re.compile(r"<(?:a\b[^>]*\bhref\s*=|article\b|tr\b)", re.I)
+_IMAGE_ANSWER = re.compile(r"<input\b[^>]*\bname\s*=\s*['\"]?answer\b", re.I)
 
 
 def detect_block(html: str, status: int, *, content_available: bool = False) -> str | None:
@@ -45,6 +46,10 @@ def detect_block(html: str, status: int, *, content_available: bool = False) -> 
             and _PUBLIC_CONTENT.search(_FORM.sub("", body)) is None
         )
     challenge_heading = _CHALLENGE_HEADING.search(body)
+    if _IMAGE_ANSWER.search(body) and re.search(r"what code is in the image\?", body, re.I) and re.search(
+        r"testing whether you are a human visitor", body, re.I
+    ):
+        return "captcha"
     if _CAPTCHA_WIDGET.search(body) and (status >= 400 or challenge_heading or short_gate):
         return "captcha"
     if challenge_heading and "/cdn-cgi/challenge-platform/" in body:

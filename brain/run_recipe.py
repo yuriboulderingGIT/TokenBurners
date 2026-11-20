@@ -25,7 +25,7 @@ _STALE_ENDPOINT_STATUSES = {400, 405, 422}
 _NEXT_PAGE_LABELS = {
     "next page", "nächste seite", "volgende pagina", "page suivante",
     "siguiente página", "página siguiente", "pagina successiva", "następna strona",
-    "página seguinte", "próxima página",
+    "página seguinte", "próxima página", "aller à la page suivante",
 }
 _NEXT_LABELS = {
     "next", "weiter", "nächste", "nächster", "volgende", "suivant", "suivante",
@@ -47,6 +47,10 @@ class RecipeReadError(ValueError):
 
 class _PageGone(RecipeReadError):
     """The endpoint returned HTTP 404 or 410."""
+
+
+class NoPublicNextLink(RecipeReadError):
+    """An enabled next-page control cannot be followed by the HTTP reader."""
 
 
 class PaginationError(RecipeReadError):
@@ -112,7 +116,7 @@ async def run_recipe(
         observed_count += len(entries)
         advertised_count = max(advertised_count, _advertised_total_count(page))
         try:
-            advertised = _advertised_next_urls(page, current_url)
+            advertised = advertised_next_urls(page, current_url)
             following = _navigation_url(
                 current_url, next_page(page), origin, "list.next_page", source=page,
                 advertised=advertised,
@@ -321,7 +325,7 @@ def _navigation_url(
     return url
 
 
-def _advertised_next_urls(page: Any, base_url: str) -> set[str]:
+def advertised_next_urls(page: Any, base_url: str) -> set[str]:
     """Independent evidence that treating this listing as the final page would lose rows."""
     links = []
     if isinstance(page, html.HtmlElement):
@@ -344,7 +348,7 @@ def _advertised_next_urls(page: Any, base_url: str) -> set[str]:
         return set()
     urls = {url for link in links if (url := _resolve_http_url(base_url, link))}
     if isinstance(page, html.HtmlElement) and links and not urls:
-        raise RecipeReadError("the next page control provides no public HTTP link")
+        raise NoPublicNextLink("the next page control provides no public HTTP link")
     return urls
 
 
@@ -356,7 +360,7 @@ def _is_next_page_link(node: html.HtmlElement, base_url: str) -> bool:
         return True
     labels = {
         " ".join(value.casefold().split()).strip(" ›»→←‹«.")
-        for value in (node.get("aria-label", ""), node.get("title", ""), node.text_content())
+        for value in (node.text_content(), *node.xpath("descendant-or-self::*/@title | descendant-or-self::*/@aria-label"))
     }
     if labels & _NEXT_PAGE_LABELS:
         return True
