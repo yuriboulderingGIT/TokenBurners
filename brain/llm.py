@@ -26,7 +26,7 @@ PRICES: dict[str, tuple[float, float]] = {
     "gpt-5-mini": (0.25, 2.00),
     "gpt-5": (1.25, 10.00),
 }
-MAX_OUTPUT_TOKENS = 4_096
+MAX_OUTPUT_TOKENS = 16_384
 CONTEXT_WINDOW = 400_000
 
 
@@ -82,8 +82,10 @@ class LLM:
             raise LLMUnavailable(f"no budget pricing configured for model {model}")
         price_in, price_out = prices
         instructions = system + " Always answer with valid JSON only."
+        # Responses JSON mode requires the word JSON in input, even with top-level instructions.
+        model_input = "Return a JSON object.\n" + prompt
         # These text-only models tokenize bytes. Include headroom for the fixed Responses envelope.
-        max_input = min(CONTEXT_WINDOW, len(instructions.encode()) + len(prompt.encode()) + 1_024)
+        max_input = min(CONTEXT_WINDOW, len(instructions.encode()) + len(model_input.encode()) + 1_024)
         max_cost = (max_input * price_in + MAX_OUTPUT_TOKENS * price_out) / 1e6
         reservation = self.db.llm_try_reserve(portal_id, run_id, max_cost, self.budget_usd)
         if reservation is None:
@@ -93,8 +95,9 @@ class LLM:
             response = await self._get_client().responses.create(
                 model=model,
                 instructions=instructions,
-                input=prompt,
+                input=model_input,
                 text={"format": {"type": "json_object"}},
+                reasoning={"effort": "low"},
                 max_output_tokens=MAX_OUTPUT_TOKENS,
                 service_tier="default",
             )
@@ -128,6 +131,8 @@ class LLM:
         if on_cost is not None:
             on_cost(cost)
 
+        if getattr(getattr(response, "incomplete_details", None), "reason", None) == "max_output_tokens":
+            raise json.JSONDecodeError("model response reached the output token limit", response.output_text, 0)
         data = json.loads(response.output_text)
         if cached:
             cached.parent.mkdir(parents=True, exist_ok=True)

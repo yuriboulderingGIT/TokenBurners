@@ -11,7 +11,7 @@ from brain.learn import (
     RecipeValidationError, detail_sample, propose_html_recipe, read_page_sample, validate_candidate,
 )
 from brain.llm import ScopedLLM
-from brain.run_recipe import PaginationError, RecipeReadError, portal_origin
+from brain.run_recipe import PaginationError, RecipeReadError, canonical_origin, fetch_page, portal_origin
 
 MAX_TRIES = 3
 
@@ -25,8 +25,16 @@ async def repair(
     if origin is None:
         return None
     discovery_url = portal_url or recipe.list_.url
-    if recipe.kind == "json_api" and portal_origin(discovery_url) != origin:
-        return None
+    if recipe.kind == "json_api" and (entry_origin := portal_origin(discovery_url)) != origin:
+        if entry_origin is None or not canonical_origin(entry_origin, origin):
+            return None
+        try:
+            response = await fetch_page(fetch, discovery_url, entry_origin, entry_redirects=True)
+        except (RecipeReadError, httpx.HTTPError):
+            return None
+        discovery_url = str(response.url)
+        if portal_origin(discovery_url) != origin:
+            return None
     if recipe.kind == "html":
         try:
             listing = await read_page_sample(recipe.list_.url, fetch, origin)

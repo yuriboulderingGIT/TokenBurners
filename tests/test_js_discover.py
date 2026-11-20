@@ -4,10 +4,11 @@ import asyncio
 import json
 import os
 
+import httpx
 import pytest
 from playwright.async_api import async_playwright
 
-from app.fetcher import FakeFetcher
+from app.fetcher import FakeFetcher, Fetcher
 from app.models import Health, Recipe
 from brain import js_discover
 from brain.js_discover import discover_json_api
@@ -27,6 +28,8 @@ class FixtureFetcher(FakeFetcher):
     async def get(self, portal_id, url, **kwargs):
         response = await super().get(portal_id, url, **kwargs)
         response.headers["content-type"] = "application/json" if "/api/" in url else "text/html; charset=utf-8"
+        if url.endswith(".js"):
+            response.headers["content-type"] = "application/javascript"
         return response
 
 
@@ -39,7 +42,7 @@ async def require_chromium():
 def test_discover_and_replay_public_json_feed_after_config_responses(monkeypatch):
     monkeypatch.setattr(js_discover, "_EXTRA_CAPTURE_SECONDS", 0.05)
     monkeypatch.setattr(js_discover, "_JSON_WAIT_SECONDS", 3)
-    config_paths = ["/api/tenders/config", *[f"/api/config/{index}" for index in range(1, 5)]]
+    config_paths = ["/api/tenders/config", *[f"/api/config/{index}" for index in range(1, 17)]]
     first_feed = {
         "items": [{"id": "SPA-1", "title": "Library repairs", "url": "/notices/1"}],
         "next": "/api/tenders?page=2",
@@ -72,14 +75,15 @@ def test_discover_and_replay_public_json_feed_after_config_responses(monkeypatch
     async def exercise():
         await require_chromium()
         fetcher = FixtureFetcher({
-            f"{BASE}/tenders": f"""
+            f"{BASE}/tenders": """
                 <link rel="stylesheet" href="/style.css">
-                <script>
+                <script src="/bundle.js"></script>
+            """,
+            f"{BASE}/bundle.js": " " * 600_000 + f"""
                     Promise.all({json.dumps(config_paths)}.map(path => fetch(path)))
                         .then(() => setTimeout(() => fetch('/api/tenders'), 200));
                     fetch('/api/write', {{method: 'POST'}});
                     fetch('https://unobserved.example/api');
-                </script>
             """,
             **{
                 f"{BASE}{path}": json.dumps({"items": [{"id": str(index), "title": "Theme options"}]})
@@ -97,7 +101,7 @@ def test_discover_and_replay_public_json_feed_after_config_responses(monkeypatch
             requested = [url for _, _, url in fetcher.request_log]
             assert requested[0] == f"{BASE}/tenders"
             assert requested[-1] == f"{BASE}/api/tenders"
-            assert set(requested[1:-1]) == {f"{BASE}{path}" for path in config_paths}
+            assert set(requested[1:-1]) == {f"{BASE}{path}" for path in ["/bundle.js", *config_paths]}
             tenders = await run_recipe(recipe, scoped)
             assert [item.fields["id"] for item in tenders] == ["SPA-1", "SPA-2"]
             assert tenders[1].url == f"{BASE}/notices/2"
@@ -107,12 +111,15 @@ def test_discover_and_replay_public_json_feed_after_config_responses(monkeypatch
     asyncio.run(exercise())
 
 
-def test_repair_rediscovers_moved_json_feed_from_original_entry(monkeypatch):
+@pytest.mark.parametrize("redirected", [False, True])
+def test_repair_rediscovers_moved_json_feed_from_original_entry(monkeypatch, redirected):
     monkeypatch.setattr(js_discover, "_EXTRA_CAPTURE_SECONDS", 0.05)
     monkeypatch.setattr(js_discover, "_JSON_WAIT_SECONDS", 3)
-    old_url = f"{BASE}/api/tenders-old"
-    entry_url = f"{BASE}/tenders"
-    new_url = f"{BASE}/api/tenders"
+    base = "https://www.portal.example" if redirected else BASE
+    old_url = f"{base}/api/tenders-old"
+    entry_url = f"{base}/tenders"
+    original_url = f"{BASE}/tenders"
+    new_url = f"{base}/api/tenders"
     previous = Recipe.model_validate({
         "kind": "json_api", "list": {"url": old_url, "item": "$.items[*]"},
         "fields": {"id": "$.id", "title": "$.title"},
@@ -134,17 +141,27 @@ def test_repair_rediscovers_moved_json_feed_from_original_entry(monkeypatch):
 
     async def exercise():
         await require_chromium()
-        fetcher = FixtureFetcher({
-            entry_url: "<script>fetch('/api/tenders');</script>",
-            new_url: json.dumps({"items": [{"id": "NEW-1", "title": "Roof replacement"}]}),
-        })
+
+        def respond(request):
+            url = str(request.url)
+            if redirected and url == original_url:
+                return httpx.Response(301, headers={"location": entry_url})
+            if url == entry_url:
+                return httpx.Response(
+                    200, headers={"content-type": "text/html"}, text="<script>fetch('/api/tenders')</script>",
+                )
+            assert url == new_url
+            return httpx.Response(200, json={"items": [{"id": "NEW-1", "title": "Roof replacement"}]})
+
+        fetcher = Fetcher(min_interval=0, transport=httpx.MockTransport(respond))
         try:
             scoped = fetcher.for_portal("fixture")
             health = Health(ok=False, problems=["portal returned HTTP 404"])
-            candidate = await repair(previous, health, scoped, FixtureLLM(), portal_url=entry_url)
+            candidate = await repair(previous, health, scoped, FixtureLLM(), portal_url=original_url)
             assert candidate is not None
             assert candidate.list_.url == new_url
-            assert [url for _, _, url in fetcher.request_log] == [entry_url, new_url, new_url]
+            prefix = [original_url, entry_url] if redirected else []
+            assert [url for _, _, url in fetcher.request_log] == prefix + [entry_url, new_url, new_url]
         finally:
             await fetcher.aclose()
 

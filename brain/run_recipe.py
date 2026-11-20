@@ -1,5 +1,6 @@
 """Read tenders and document links from a saved recipe without model calls."""
 
+import logging
 import re
 from collections.abc import Callable, Iterator
 from itertools import islice
@@ -17,9 +18,10 @@ from brain.blocks import Blocked, detect_block
 from brain.shrink import shrink
 
 MAX_PAGES = 100
+log = logging.getLogger(__name__)
 _MAX_REDIRECTS = 5
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
-_STALE_ENDPOINT_STATUSES = {400, 404, 405, 410, 422}
+_STALE_ENDPOINT_STATUSES = {400, 405, 422}
 _NEXT_PAGE_LABELS = {
     "next page", "nächste seite", "volgende pagina", "page suivante",
     "siguiente página", "página siguiente", "pagina successiva", "następna strona",
@@ -41,6 +43,10 @@ Origin = tuple[str, str, int]
 
 class RecipeReadError(ValueError):
     """A page or selector prevents the recipe from being read reliably."""
+
+
+class _PageGone(RecipeReadError):
+    """The endpoint returned HTTP 404 or 410."""
 
 
 class PaginationError(RecipeReadError):
@@ -86,6 +92,7 @@ async def run_recipe(
     tenders: list[RawTender] = []
     seen_pages: set[str] = set()
     observed_count = advertised_count = 0
+    sampled = skipped = 0
     for page_number in range(1, recipe.list_.max_pages + 1):
         if page_url in seen_pages:
             raise PaginationError("pagination revisited a list page")
@@ -104,8 +111,8 @@ async def run_recipe(
             raise PaginationError(f"list.item found no tenders on page {page_number}", sample_page)
         observed_count += len(entries)
         advertised_count = max(advertised_count, _advertised_total_count(page))
-        advertised = _advertised_next_urls(page, current_url)
         try:
+            advertised = _advertised_next_urls(page, current_url)
             following = _navigation_url(
                 current_url, next_page(page), origin, "list.next_page", source=page,
                 advertised=advertised,
@@ -125,7 +132,8 @@ async def run_recipe(
             return []
 
         if max_tenders is not None:
-            entries = entries[:max_tenders - len(tenders)]
+            entries = entries[:max_tenders - sampled]
+        sampled += len(entries)
         for entry in entries:
             source = entry
             tender_url = current_url
@@ -135,7 +143,11 @@ async def run_recipe(
                 )
                 if link is None:
                     raise RecipeReadError("detail.link found no URL for a list entry")
-                detail_response = await fetch_page(fetch, link, origin)
+                try:
+                    detail_response = await fetch_page(fetch, link, origin)
+                except _PageGone:
+                    skipped += 1
+                    continue
                 tender_url = str(detail_response.url)
                 source = _parse_page(detail_response, recipe.kind)
 
@@ -146,8 +158,8 @@ async def run_recipe(
             document_urls = list(dict.fromkeys(
                 url
                 for value in _strings(documents(source), links=True)
-                if (url := resolve_portal_url(tender_url, value, origin)) is not None
-                and _observed_href(source, tender_url, url, origin)
+                if (url := _resolve_http_url(tender_url, value)) is not None
+                and _observed_href(source, tender_url, url)
             ))
             if recipe.kind == "html" and recipe.detail.link is not None:
                 _check_block(
@@ -161,10 +173,18 @@ async def run_recipe(
                 else:
                     tender_url = resolve_portal_url(tender_url, values["url"], origin) or tender_url
             tenders.append(RawTender(url=tender_url, fields=values, document_links=document_urls))
-        if following is None or (not verify_all_pages and max_tenders == len(tenders)):
-            return tenders
+        if following is None or (not verify_all_pages and max_tenders == sampled):
+            break
         page_url = following
-    raise PaginationError("pagination exceeded the recipe's max_pages")
+    else:
+        raise PaginationError("pagination exceeded the recipe's max_pages")
+    if skipped:
+        message = f"{skipped} of {sampled} tender detail pages returned HTTP 404 or 410"
+        log.info("%s: %s", recipe.list_.url, message)
+        # Tolerate one removed notice, or up to 20% on larger listings.
+        if not tenders or (skipped >= 2 and skipped * 5 > sampled):
+            raise RecipeReadError(message)
+    return tenders
 
 
 def _selector(kind: str, expression: str | None, label: str) -> Selector:
@@ -191,7 +211,9 @@ def _selector(kind: str, expression: str | None, label: str) -> Selector:
     return select
 
 
-async def fetch_page(fetch: PortalFetcher, url: str, origin: Origin) -> httpx.Response:
+async def fetch_page(
+    fetch: PortalFetcher, url: str, origin: Origin, *, entry_redirects: bool = False,
+) -> httpx.Response:
     """Check redirects before requesting them, under the same portal rate limit."""
     if portal_origin(url) != origin:
         raise RecipeReadError("page URL is outside the recipe's origin")
@@ -201,19 +223,48 @@ async def fetch_page(fetch: PortalFetcher, url: str, origin: Origin) -> httpx.Re
             if not response.is_success:
                 _check_block(response)
                 message = f"portal returned HTTP {response.status_code}"
+                if response.status_code in {404, 410}:
+                    raise _PageGone(message)
                 if response.status_code in _STALE_ENDPOINT_STATUSES:
                     raise RecipeReadError(message)
                 raise httpx.HTTPStatusError(message, request=response.request, response=response)
             return response
-        redirect = resolve_portal_url(url, response.headers.get("Location", ""), origin)
-        if redirect is None:
+        redirect = _resolve_http_url(url, response.headers.get("Location", ""))
+        target = portal_origin(redirect) if redirect else None
+        if target is None or (target != origin and not (entry_redirects and canonical_origin(origin, target))):
             _check_block(response)
             raise RecipeReadError("portal redirected outside the recipe's origin")
         url = redirect
+        origin = target
     raise RecipeReadError("portal exceeded the redirect limit")
 
 
+def canonical_origin(start: Origin, target: Origin) -> bool:
+    """Allow an HTTPS upgrade or a single www alias on a portal's entry URL."""
+    scheme, host, port = start
+    new_scheme, new_host, new_port = target
+    if host.removeprefix("www.") != new_host.removeprefix("www."):
+        return False
+    if scheme == new_scheme:
+        return port == new_port
+    return scheme == "http" and new_scheme == "https" and (port == new_port or (port, new_port) == (80, 443))
+
+
+def is_json_response(response: httpx.Response) -> bool:
+    media_type = response.headers.get("content-type", "").partition(";")[0].strip().lower()
+    if media_type == "application/json" or media_type.endswith("+json"):
+        return True
+    if response.content.lstrip()[:1] in (b"{", b"["):
+        try:
+            return isinstance(response.json(), (dict, list))
+        except (ValueError, RecursionError):
+            pass
+    return False
+
+
 def _parse_page(response: httpx.Response, kind: str) -> Any:
+    if kind == "html" and is_json_response(response):
+        raise RecipeReadError("the portal returned JSON, but the recipe expects HTML")
     try:
         if kind == "json_api":
             return response.json()
@@ -242,7 +293,7 @@ def _navigation_url(
     url = resolve_portal_url(base_url, links[0], origin)
     if url is None:
         raise RecipeReadError(f"{label} selected an invalid or off-origin URL")
-    if not (advertised and url in advertised) and not _observed_href(source, base_url, url, origin):
+    if not (advertised and url in advertised) and not _observed_href(source, base_url, url):
         raise RecipeReadError(f"{label} selected a URL absent from the page's links")
     return url
 
@@ -251,9 +302,12 @@ def _advertised_next_urls(page: Any, base_url: str) -> set[str]:
     """Independent evidence that treating this listing as the final page would lose rows."""
     links = []
     if isinstance(page, html.HtmlElement):
-        for node in page.xpath("descendant-or-self::a[@href] | descendant-or-self::link[@href and @rel]"):
+        for node in page.xpath(
+            "descendant-or-self::a[@href] | descendant-or-self::button | "
+            "descendant-or-self::link[@href and @rel]"
+        ):
             if _is_next_page_link(node, base_url):
-                links.append(node.get("href"))
+                links.append(node.get("href", ""))
     elif isinstance(page, dict):
         # A JSON 'next' can also be an opaque cursor. Only explicit URL references count.
         for container in (page, page.get("links"), page.get("_links"), page.get("pagination")):
@@ -265,7 +319,10 @@ def _advertised_next_urls(page: Any, base_url: str) -> set[str]:
                     links.append(value)
     else:
         return set()
-    return {url for link in links if (url := _resolve_http_url(base_url, link))}
+    urls = {url for link in links if (url := _resolve_http_url(base_url, link))}
+    if isinstance(page, html.HtmlElement) and links and not urls:
+        raise RecipeReadError("the next page control provides no public HTTP link")
+    return urls
 
 
 def _is_next_page_link(node: html.HtmlElement, base_url: str) -> bool:
@@ -282,7 +339,7 @@ def _is_next_page_link(node: html.HtmlElement, base_url: str) -> bool:
         return True
     if not labels & _NEXT_LABELS:
         return False
-    return _has_paging_url(base_url, node.get("href")) or any(
+    return _has_paging_url(base_url, node.get("href", "")) or any(
         _PAGER_CONTEXT.search(control.get(attribute, "").replace("_", " "))
         for control in context
         for attribute in ("class", "id", "aria-label")
@@ -338,11 +395,11 @@ def _advertised_total_count(page: Any) -> int:
     return total
 
 
-def _observed_href(source: Any, base_url: str, url: str, origin: Origin) -> bool:
+def _observed_href(source: Any, base_url: str, url: str) -> bool:
     if not isinstance(source, html.HtmlElement):
         return True  # JSONPath selects values from the response itself.
     return any(
-        resolve_portal_url(base_url, href, origin) == url
+        _resolve_http_url(base_url, href) == url
         for href in source.xpath("descendant-or-self::a/@href")
     )
 
