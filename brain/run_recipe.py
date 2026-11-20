@@ -1,12 +1,13 @@
 """Read tenders and document links from a saved recipe without model calls."""
 
 import hashlib
+import json
 import logging
 import re
 from collections.abc import Callable, Iterator
 from itertools import islice
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urldefrag, urljoin, urlsplit
+from urllib.parse import parse_qs, unquote_plus, urlencode, urldefrag, urljoin, urlsplit
 
 import httpx
 from jsonpath_ng import parse as parse_jsonpath
@@ -36,6 +37,8 @@ _NEXT_LABELS = {
 _PAGE_QUERY_KEYS = {
     "p", "page", "pagenum", "pagenumber", "pageindex", "offset", "skip", "start", "cursor", "seite", "pagina",
 }
+_OFFSET_QUERY_KEYS = {"offset", "skip", "start"}
+_TOTAL_KEYS = {"total", "totalcount", "nbtotal", "totalelements", "totalresults", "totalrecords", "totalhits", "nbhits"}
 _PAGER_CONTEXT = re.compile(r"\b(?:pagination|paginator|paging|pager|page navigation)\b", re.I)
 _PAGE_PATH_SUFFIX = re.compile(r"/(?:page|seite|pagina)/[0-9]+/?$", re.I)
 
@@ -136,6 +139,11 @@ async def run_recipe(
                 if digest in seen_rows:
                     raise PaginationError("the next listing page repeated the same notice rows", sample_page)
                 seen_rows.add(digest)
+        elif recipe.kind == "json_api" and entries and not search_pages:
+            digest = hashlib.sha256(json.dumps(entries, sort_keys=True, default=str).encode()).digest()
+            if digest in seen_rows:
+                raise PaginationError("the next JSON page repeated the same entries")
+            seen_rows.add(digest)
 
         if not entries and page_number > 1:
             if search_pages and observed_count >= advertised_count:
@@ -168,6 +176,9 @@ async def run_recipe(
                 raise MissedNextPage(
                     f"list.next_page missed the advertised next page on page {page_number}", sample_page
                 )
+            if (recipe.kind == "json_api" and recipe.list_.next_page is None and entries
+                    and observed_count < advertised_count):
+                following = _next_query_page(current_url, len(entries))
         if following is None and observed_count < advertised_count:
             raise PaginationError(
                 f"the {'JSON' if recipe.kind == 'json_api' else 'HTML'} list advertised {advertised_count} tenders, but pagination exposed "
@@ -615,13 +626,31 @@ def _advertised_total_count(page: Any) -> int:
     for container in containers:
         if not isinstance(container, dict):
             continue
-        for key in ("total_count", "totalCount"):
-            value = container.get(key)
+        for key, value in container.items():
+            if not isinstance(key, str) or re.sub(r"[^a-z]", "", key.lower()) not in _TOTAL_KEYS:
+                continue
             if isinstance(value, str) and len(value) <= 18 and re.fullmatch(r"[0-9]+", value):
                 value = int(value)
             if type(value) is int:
                 total = max(total, value)
     return total
+
+
+def _next_query_page(url: str, page_size: int) -> str | None:
+    """Advance the one numeric paging parameter of a feed that states a total but links no next page."""
+    parts = urlsplit(url)
+    pairs = parts.query.split("&")
+    paging = []
+    for index, pair in enumerate(pairs):
+        key, _, value = pair.partition("=")
+        if re.sub(r"[^a-z]", "", unquote_plus(key).lower()) in _PAGE_QUERY_KEYS and value.isascii() and value.isdigit():
+            paging.append((index, key, int(value)))
+    if len(paging) != 1:
+        return None
+    index, key, value = paging[0]
+    step = page_size if re.sub(r"[^a-z]", "", unquote_plus(key).lower()) in _OFFSET_QUERY_KEYS else 1
+    pairs[index] = f"{key}={value + step}"
+    return parts._replace(query="&".join(pairs)).geturl()
 
 
 def _observed_href(source: Any, base_url: str, url: str) -> bool:

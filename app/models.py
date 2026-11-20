@@ -104,6 +104,7 @@ class SearchTransport(BaseModel):
     endpoint: str
     media_type: Literal["application/json", "application/x-www-form-urlencoded"]
     page_field: str | None = None
+    page_path: list[str] | None = None  # JSON keys leading to the object that holds page_field
     html_path: list[str] | None = None
     total_path: list[str] | None = None
 

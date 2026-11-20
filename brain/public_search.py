@@ -42,7 +42,7 @@ def eligible_endpoint(page_url: str, url: str) -> bool:
     # Only anonymous XHR/fetch requests to identifiable read operations qualify.
     path = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
     words = re.sub(r"([a-z])([A-Z])", r"\1 \2", path).lower()
-    return bool(re.fullmatch(r"(?:search|query|find|list|results|next publications|"
+    return bool(re.fullmatch(r"(?:search|query|find|list|results|next publications|graphql|"
                              r"get (?:results|notices|publications|tenders)(?: by [a-z ]+)?)", words))
 
 
@@ -77,24 +77,28 @@ class ObservedSearch:
             return None
         if re.search(r'"(?:password|access_token|authorization|mutation)"\s*:|\bmutation\s*[{(]', raw, re.I):
             return None
-        fields = [k for k,v in params.items() if k.lower() in {"offset","start","skip","page","pageindex","pagenumber"}
-                  and str(v).isascii() and str(v).isdigit()]
+        fields = _paging_fields(params)
         if len(fields) > 1:
             return None
-        spec = SearchTransport(endpoint=request.url, media_type=media, page_field=next(iter(fields), None))
+        path, key = fields[0] if fields else (None, None)
+        spec = SearchTransport(endpoint=request.url, media_type=media, page_field=key, page_path=path or None)
         return cls(spec, params, visit, total)
 
     async def read(self, index: int, offset: int):
-        params = self.params.copy()
+        params = json.loads(json.dumps(self.params))
         key = self.spec.page_field
         if key is not None:
+            try:
+                container, original = at_path(params, self.spec.page_path or []), at_path(self.params, self.spec.page_path or [])
+                first = int(original[key])
+            except (RecipeReadError, KeyError, TypeError, ValueError) as exc:
+                raise RecipeReadError("could not establish the first search page") from exc
             if key.lower() in {"offset", "start", "skip"}:
-                params[key] = offset
+                container[key] = offset
             else:
-                first = int(self.params[key])
                 if first not in (0, 1):
                     raise RecipeReadError("could not establish the first search page")
-                params[key] = first + index
+                container[key] = first + index
         body = json.dumps(params).encode() if self.spec.media_type == "application/json" else urlencode(params).encode()
         url = self.spec.endpoint
         for _ in range(4):
@@ -113,6 +117,18 @@ class ObservedSearch:
             return response.json()
         except ValueError as exc:
             raise RecipeReadError(f"public search returned HTTP {response.status_code} without JSON results") from exc
+
+
+def _paging_fields(params, path=()):
+    """Numeric page or offset parameters, also inside nested query variables such as GraphQL's."""
+    found = []
+    for key, value in params.items():
+        if isinstance(value, dict) and len(path) < 3:
+            found += _paging_fields(value, (*path, key))
+        elif (key.lower() in {"offset", "start", "skip", "page", "pageindex", "pagenumber"}
+              and not isinstance(value, bool) and str(value).isascii() and str(value).isdigit()):
+            found.append((list(path), key))
+    return found
 
 
 def at_path(payload, path):
@@ -147,7 +163,8 @@ class SearchPages:
 
         for key, payload in await _capture_json(url, fetch, target=spec.endpoint):
             if (isinstance(key, ObservedSearch) and key.spec.endpoint == spec.endpoint
-                    and key.spec.media_type == spec.media_type and key.spec.page_field == spec.page_field):
+                    and key.spec.media_type == spec.media_type and key.spec.page_field == spec.page_field
+                    and key.spec.page_path == spec.page_path):
                 return cls(key, spec, payload, key.source_total)
         raise RecipeReadError("could not reproduce the saved anonymous search from the public listing")
 

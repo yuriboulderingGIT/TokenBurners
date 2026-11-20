@@ -132,7 +132,9 @@ async def discover_json_api(
                 "item": list_spec.get("item"),
                 "next_page": list_spec.get("next_page"),
                 # Paging is reconstructed from the observed search, independently of a URL selector.
-                "max_pages": MAX_PAGES if search else list_spec.get("max_pages", MAX_PAGES),
+                # Without a next selector the reader advances the feed's own paging parameter.
+                "max_pages": MAX_PAGES if search or not list_spec.get("next_page")
+                             else list_spec.get("max_pages", MAX_PAGES),
                 "url": url if search else key,
                 "search": search,
             },
@@ -173,12 +175,14 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = 
         if (requests < _MAX_REQUESTS and cancelled is None and request.method == "POST"
                 and request.resource_type in {"xhr", "fetch"} and (target is None or request.url == target)):
             search = ObservedSearch.observe(url, request, visit, source_total)
-            if search is not None and request.url not in searches:
+            # One GraphQL URL serves several operations; the body tells them apart.
+            key = (request.url, request.post_data)
+            if search is not None and key not in searches:
                 requests += 1
                 try:
                     payload = await search.read(0, 0)
                     if fragment_path(payload) is not None or _feed_rank(payload, urlsplit(request.url).path):
-                        searches[request.url] = (search, payload)
+                        searches[key] = (search, payload)
                         ready.set()
                 except PortalCancelled as exc:
                     cancelled = exc
@@ -187,18 +191,28 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = 
                     search_problem = exc
             await route.abort()
             return
+        # A listing widget's code may live on a CDN; it runs as in a visitor's browser,
+        # while documents and data requests stay on the portal's own origin.
+        widget_code = request.resource_type == "script" and request.url.startswith("https://")
         if (
             requests >= _MAX_REQUESTS
             or cancelled is not None
             or request.method != "GET"
             or request.resource_type not in _BROWSER_REQUESTS
-            or portal_origin(request.url) != origin
+            or (portal_origin(request.url) != origin and not widget_code)
         ):
             await route.abort()
             return
         requests += 1
         try:
-            response = await asyncio.wait_for(fetch_page(visit, request.url, origin), timeout=_PAGE_LOAD_SECONDS)
+            if portal_origin(request.url) == origin:
+                load = fetch_page(visit, request.url, origin)
+            else:
+                load = fetch.get(request.url)
+            response = await asyncio.wait_for(load, timeout=_PAGE_LOAD_SECONDS)
+            if not response.is_success:
+                await route.abort()
+                return
         except PortalCancelled as exc:
             cancelled = exc
             ready.set()
@@ -224,11 +238,12 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = 
                 document_block = Blocked(kind)
                 await route.abort()
                 return
-        byte_limit = _MAX_SCRIPT_BYTES if request.resource_type in {"script", "document"} else _MAX_RESPONSE_BYTES
-        if len(response.content) > byte_limit:
+        if len(response.content) > _MAX_SCRIPT_BYTES:
             await route.abort()
             return
-        if request.resource_type in _JSON_REQUESTS and "json" in content_type.lower():
+        # Large settings such as translations must still reach the page, which may need them to load its list.
+        if (request.resource_type in _JSON_REQUESTS and "json" in content_type.lower()
+                and len(response.content) <= _MAX_RESPONSE_BYTES):
             try:
                 payload = response.json()
             except (ValueError, RecursionError):
