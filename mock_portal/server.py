@@ -12,6 +12,9 @@ Switches (open in a browser or curl; they can be combined):
     /_switch?docs=login       every document link leads to a login page -> failed, "login required"
     /_switch?docs=big         MOCK-005 also links a 300 MB ZIP -> must be skipped cleanly
     /_switch?docs=normal      back to normal
+    /_switch?dead=true       MOCK-005 stays listed but its tender page returns 404
+    /_switch?moved=true      list moves to /notices, old /tenders returns 404; / links to it
+    /_switch?https=true      HTTP list requests redirect to HTTPS (serve TLS for a live test)
     /_switch?reset=1          everything back to normal
     /_state                   show current settings
 
@@ -23,12 +26,12 @@ import io
 import zipfile
 from collections.abc import Iterator
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
 app = FastAPI(title="Mock tender portal")
 
-DEFAULT_STATE = {"layout": "v1", "variant": "ssr", "docs": "normal"}
+DEFAULT_STATE = {"layout": "v1", "variant": "ssr", "docs": "normal", "dead": False, "moved": False, "https": False}
 STATE = dict(DEFAULT_STATE)
 PAGE_SIZE = 3
 BIG_FILE_BYTES = 300 * 1024 * 1024
@@ -76,7 +79,7 @@ load("/api/tenders?page=1");
 </script></body></html>"""
 
 
-def _state(key: str) -> str:
+def _state(key: str) -> str | bool:
     """Tests may replace STATE with a dict that lacks newer keys."""
     return STATE.get(key, DEFAULT_STATE[key])
 
@@ -91,13 +94,14 @@ def _chunk(page: int) -> tuple[list[dict], bool]:
 
 
 def render_list(page: int = 1, layout: str = "v1") -> str:
+    path = _list_path()
     chunk, has_next = _chunk(page)
     if layout == "v1":
         rows = "".join(
             f'<tr><td><a href="/tender/{t["id"]}">{t["title"]}</a></td><td>{t["deadline"]}</td></tr>'
             for t in chunk
         )
-        pager = f'<a rel="next" href="/tenders?page={page + 1}">Next</a>' if has_next else ""
+        pager = f'<a rel="next" href="{path}?page={page + 1}">Next</a>' if has_next else ""
         body = (f"<h1>Current tenders</h1><table id=\"results\">"
                 f"<tr><th>Title</th><th>Deadline</th></tr>{rows}</table>{pager}")
     else:
@@ -106,7 +110,7 @@ def render_list(page: int = 1, layout: str = "v1") -> str:
             f'<span class="due">{t["deadline"]}</span></div>'
             for t in chunk
         )
-        pager = f'<a class="pager-next" href="/tenders?page={page + 1}">Next page</a>' if has_next else ""
+        pager = f'<a class="pager-next" href="{path}?page={page + 1}">Next page</a>' if has_next else ""
         body = f'<h2>Tenders</h2><div class="results">{cards}</div>{pager}'
     return _page("Tenders", body)
 
@@ -213,10 +217,14 @@ def _file_response(tender_id: str, file_name: str) -> Response:
 
 @app.get("/_switch")
 def switch(layout: str | None = None, variant: str | None = None, docs: str | None = None,
+           dead: bool | None = None, moved: bool | None = None, https: bool | None = None,
            reset: bool = False) -> dict:
     if reset:
         STATE.clear()
         STATE.update(DEFAULT_STATE)
+    for key, value in (("dead", dead), ("moved", moved), ("https", https)):
+        if value is not None:
+            STATE[key] = value
     if layout in ("v1", "v2"):
         STATE["layout"] = layout
     if variant in ("ssr", "captcha", "spa"):
@@ -231,8 +239,22 @@ def state() -> dict:
     return {key: _state(key) for key in DEFAULT_STATE}
 
 
+def _list_path() -> str:
+    return "/notices" if _state("moved") else "/tenders"
+
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return _page("Procurement", f'<a href="{_list_path()}">Current tenders</a>')
+
+
+@app.get("/notices", response_class=HTMLResponse)
 @app.get("/tenders", response_class=HTMLResponse)
-def tenders(page: int = 1):
+def tenders(request: Request, page: int = 1):
+    if _state("https") and request.url.scheme == "http":
+        return RedirectResponse(str(request.url.replace(scheme="https")), status_code=308)
+    if request.url.path != _list_path():
+        raise HTTPException(404)
     if _state("variant") == "captcha":
         return HTMLResponse(CAPTCHA_PAGE)
     if _state("variant") == "spa":
@@ -265,6 +287,8 @@ def api_tenders(page: int = 1):
 def detail(tender_id: str):
     if _state("variant") == "captcha":
         return HTMLResponse(CAPTCHA_PAGE)
+    if _state("dead") and tender_id == "MOCK-005":
+        raise HTTPException(404)
     html = render_detail(tender_id, _state("layout"))
     if html is None:
         raise HTTPException(404)

@@ -3,9 +3,12 @@
 Run before every merge to main:  pytest
 """
 
+import hashlib
+import os
 import time
 from datetime import datetime
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -26,28 +29,33 @@ def has_offset(value: str) -> bool:
     return datetime.fromisoformat(value).tzinfo is not None
 
 
-def wait_until_settled(client: TestClient, portal_id: str, timeout: float = 10) -> dict:
+def wait_until_settled(client: httpx.Client, portal_id: str, timeout: float = 10) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
         portal = client.get(f"/portals/{portal_id}").json()
-        if portal["state"] != "integrating":
+        if portal["state"] in {"serving", "failed"}:
             return portal
         time.sleep(0.1)
     raise AssertionError("portal stayed in integrating")
 
 
 def test_contract() -> None:
-    with TestClient(app) as client:
+    api = os.getenv("CONTRACT_API_URL")
+    url = os.environ["CONTRACT_PORTAL_URL"] if api else "https://portal.example/contract-a"
+    with httpx.Client(base_url=api) if api else TestClient(app) as client:
         # POST /portals -> 201 {"id"}; same URL -> same id
-        r = client.post("/portals", json={"url": "https://portal.example/contract-a"})
+        r = client.post("/portals", json={"url": url})
         assert r.status_code == 201
         assert set(r.json()) == {"id"}
         portal_id = r.json()["id"]
-        assert client.post("/portals", json={"url": "https://portal.example/contract-a"}).json()["id"] == portal_id
-        assert client.post("/portals", json={"url": "https://portal.example/contract-a/"}).json()["id"] == portal_id
+        assert client.post("/portals", json={"url": url}).json()["id"] == portal_id
+        assert client.post("/portals", json={"url": url + "/"}).json()["id"] == portal_id
 
         # GET /portals/{id}: exact shape
-        portal = wait_until_settled(client, portal_id)
+        portal = wait_until_settled(client, portal_id, timeout=120 if api else 10)
+        if api:
+            assert portal["state"] == "serving", portal
+            assert portal["tenderCount"] == 5 and portal["lastSuccessAt"]
         assert set(portal) == PORTAL_KEYS
         assert portal["state"] in STATES
         assert isinstance(portal["tenderCount"], int)
@@ -67,6 +75,9 @@ def test_contract() -> None:
         tenders = r.json()
         assert isinstance(tenders, list)
         assert len(tenders) == portal["tenderCount"]
+        if api:
+            assert {t["id"] for t in tenders} == {f"MOCK-{n:03d}" for n in range(1, 6)}
+            assert sum(len(t["documents"]) for t in tenders) == 8
         for t in tenders:
             assert TENDER_REQUIRED <= set(t), f"missing required fields: {TENDER_REQUIRED - set(t)}"
             assert set(t) <= TENDER_REQUIRED | TENDER_OPTIONAL, f"unknown fields: {set(t) - TENDER_REQUIRED - TENDER_OPTIONAL}"
@@ -78,6 +89,10 @@ def test_contract() -> None:
                 assert len(code) == 8 and code.isdigit()
             for doc in t["documents"]:
                 assert set(doc) == {"fileName", "sizeBytes", "sha256", "path"}
+                content = client.get(doc["path"])
+                assert content.status_code == 200
+                assert len(content.content) == doc["sizeBytes"]
+                assert hashlib.sha256(content.content).hexdigest() == doc["sha256"]
             for key in TENDER_OPTIONAL:
                 assert t.get(key, "absent") is not None, f"optional {key} must be left out, not null"
 

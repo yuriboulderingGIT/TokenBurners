@@ -32,6 +32,7 @@ def test_concurrent_workers_share_a_single_budget(tmp_path):
         calls = []
 
         async def create(**request):
+            assert "json" in request["input"].lower()
             calls.append(request)
             started.set()
             await finish.wait()

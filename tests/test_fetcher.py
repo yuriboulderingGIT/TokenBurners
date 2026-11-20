@@ -24,12 +24,12 @@ def test_requests_to_one_portal_are_spaced() -> None:
     assert all(g >= 0.19 for g in gaps), gaps
 
 
-def test_different_portals_do_not_wait_for_each_other() -> None:
+def test_different_portals_on_different_hosts_do_not_wait_for_each_other() -> None:
     async def run() -> float:
         f = _fetcher(1.0)
         loop = asyncio.get_running_loop()
         start = loop.time()
-        await asyncio.gather(*(f.get(f"p{i}", "https://a.test/") for i in range(5)))
+        await asyncio.gather(*(f.get(f"p{i}", f"https://{i}.test/") for i in range(5)))
         await f.aclose()
         return loop.time() - start
 
@@ -72,3 +72,32 @@ def test_redirect_hops_each_wait_their_turn() -> None:
     text, times = asyncio.run(run())
     assert text == "here"
     assert len(times) == 2 and times[1] - times[0] >= 0.19
+
+
+def test_two_portals_share_destination_host_even_across_schemes_and_ports() -> None:
+    async def run():
+        f = _fetcher(1.0)
+        try:
+            await asyncio.gather(
+                f.get("one", "http://A.test:8080/list"),
+                f.for_portal("two").wait_turn("https://a.test/docs"),
+            )
+            return [t for _, t, _ in f.request_log]
+        finally:
+            await f.aclose()
+
+    first, second = asyncio.run(run())
+    assert second - first >= 1.0
+
+
+def test_one_portal_remains_spaced_across_hosts() -> None:
+    async def run():
+        f = _fetcher(0.1)
+        try:
+            await asyncio.gather(f.get("p", "https://a.test"), f.get("p", "https://b.test"))
+            return [t for _, t, _ in f.request_log]
+        finally:
+            await f.aclose()
+
+    first, second = asyncio.run(run())
+    assert second - first >= 0.1

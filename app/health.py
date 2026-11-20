@@ -98,15 +98,23 @@ def _fill_rate(tenders: list[Tender], field: str) -> float:
 
 def _fill_problems(tenders: list[Tender], previous: list[Tender]) -> list[str]:
     problems = []
+    # New notices can legitimately omit fields (for example a deadline with a date only).
+    # Compare the same notices across reads. Title coverage still applies to the entire list.
+    previous_by_id = {t.id: t for t in previous}
+    continuing = [t for t in tenders if t.id in previous_by_id]
+    before = [previous_by_id[t.id] for t in continuing]
     for field in REQUIRED_FIELDS:
-        rate = _fill_rate(tenders, field)
+        sample = tenders if field == "title" else continuing
+        if not sample:
+            continue
+        rate = _fill_rate(sample, field)
         if rate >= MIN_FILL_RATE:
             continue
-        used_to_work = bool(previous) and _fill_rate(previous, field) >= MIN_FILL_RATE
+        used_to_work = bool(before) and _fill_rate(before, field) >= MIN_FILL_RATE
         if used_to_work or field == "title":
-            missing = sum(getattr(t, field) is None for t in tenders)
+            missing = sum(getattr(t, field) is None for t in sample)
             problems.append(
-                f"{_FIELD_NAMES[field]} is missing or unreadable for {missing} of {len(tenders)} tenders"
+                f"{_FIELD_NAMES[field]} is missing or unreadable for {missing} of {len(sample)} tenders"
             )
     return problems
 

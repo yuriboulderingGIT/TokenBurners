@@ -165,3 +165,17 @@ def test_crashed_normal_read_while_healing_keeps_healing(monkeypatch) -> None:
     portal = db.portal_get(portal_id)
     assert portal["state"] == states.HEALING
     assert "serving last good tenders" in portal["reason"]
+
+
+def test_attach_failure_with_empty_message_still_explains_state(monkeypatch):
+    from brain.learn import AttachFailed
+
+    async def fail(*args):
+        raise AttachFailed("")
+
+    monkeypatch.setattr("app.worker.learn_recipe", fail)
+    model = type("FixtureModel", (), {"scoped": lambda *args: None})()
+    worker = Worker(db, fetcher=FakeFetcher({}), llm=model)
+    portal_id = db.portal_create("https://portal.example/empty-feedback")
+    _run_one(worker, portal_id)
+    assert db.portal_get(portal_id)["reason"] == "could not attach: no working extraction recipe was found"
