@@ -1,6 +1,8 @@
 # Developing Watchtower
 
-The plan is `Watchtower_Build_Plan.pdf`. This page explains how to work in this repo.
+The plan is **`Watchtower_Plan_v2.pdf`** (it replaces the task lists and timeline of
+`Watchtower_Build_Plan.pdf`; the API contract, tender fields and recipe format of plan v1 still hold).
+This page explains how to work in this repo.
 
 ## First-time setup (Windows PowerShell)
 
@@ -35,20 +37,16 @@ Or open http://localhost:8080/docs and use the "Try it out" buttons.
 
 Start fresh: stop the server and delete the `data/` folder.
 
-## What is real and what is a stub (H0)
+## Who owns what (plan v2)
 
-The whole pipeline runs end to end already. POST a portal and it goes to `serving` with
-3 **fake** tenders, because the Brain parts are stubs. Replace your stubs; keep the signatures.
+| Role | Files |
+|---|---|
+| A1 Platform | `app/main.py`, `db.py`, `models.py`, `worker.py`, `fetcher.py`, `config.py`, `templates/`, `Dockerfile`, `.github/`, `tests/contract_test.py`, `testset/run_all.py` |
+| A2 Quality | `app/states.py`, `health.py`, `documents.py`, `mock_portal/`, `README.md`, `brain/normalize.py`, `testset/` (except `run_all.py`) |
+| B1 Attach + repair | `brain/llm.py`, `shrink.py`, `learn.py`, `repair.py`, `blocks.py` |
+| B2 Data + JS | `brain/run_recipe.py`, `js_discover.py` |
 
-| File | Owner | State at H0 |
-|---|---|---|
-| `app/main.py`, `db.py`, `models.py`, `worker.py`, `fetcher.py`, `templates/` | A1 | First working version: review and own it |
-| `app/states.py`, `health.py`, `documents.py`, `mock_portal/` | A2 | Minimal / stub (see TODOs) |
-| `brain/llm.py`, `shrink.py`, `blocks.py` | B1 | Basic version (see TODOs) |
-| `brain/learn.py`, `repair.py` | B1 | Stub |
-| `brain/run_recipe.py`, `normalize.py`, `js_discover.py`, `testset/` | B2 | Stub / minimal |
-
-Search for `TODO(` plus your role to find your work.
+Current tasks per role, the timeline and the known problems: plan v2 sections 3 to 5.
 
 ## Interfaces (plan 4.2, with one change)
 
@@ -70,6 +68,9 @@ The hand-written mock recipe is in `testset/fixtures/mock/recipe_v1.json`.
 - All HTTP goes through `app/fetcher.py`. All model calls go through `brain/llm.py`.
 - Only edit files your role owns. Announce changes to `app/models.py` or the recipe format first.
 - Never commit `.env`, `data/` or `testset/secret.yaml`.
+- Every fix comes with a test (a mock switch or `FakeFetcher`). Regular reads never call the model.
+- Feature stop at 22:00 Friday: after that, fixes only. After 09:00 Saturday a merge needs a second person's OK.
+- Coding agents run on subscriptions, never on the hand-in key.
 
 ## Git workflow
 
