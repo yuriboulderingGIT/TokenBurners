@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
 from app.db import DB
 from app.fetcher import Fetcher
@@ -12,7 +13,8 @@ from lxml import html
 from brain.charite_documents import answers_url
 
 
-def test_berlin_delegated_documents_are_downloaded_for_the_matching_notice(tmp_path, monkeypatch):
+@pytest.mark.parametrize("id_from_heading", [False, True])
+def test_berlin_delegated_documents_are_downloaded_for_the_matching_notice(tmp_path, monkeypatch, id_from_heading):
     listing = "https://www.berlin.de/vergabeplattform/veroeffentlichungen/bekanntmachungen/"
     bridge = "https://meinauftrag.rib.de/public/DetailsByPlatformIdAndTenderId/platformId/2/tenderId/"
     detail = "https://meinauftrag.rib.de/public/publications/615000"
@@ -22,8 +24,10 @@ def test_berlin_delegated_documents_are_downloaded_for_the_matching_notice(tmp_p
     grid = [{"data": [{"value": "Attachments"}], "rows": [{"data": [{"value": links}]}]}]
     routes = {
         listing: httpx.Response(200, text=f"""
-            <article data-id="12"><h3>Bridge inspection</h3><button data-href="{bridge}12"></button></article>
-            <article data-id="13"><h3>Library repairs</h3><button data-href="{bridge}99"></button></article>
+            <article data-id="12"><header><h3>2026-12 Bridge inspection</h3></header>
+                <button data-href="{bridge}12"></button></article>
+            <article data-id="13"><header><h3>2026-13 Library repairs</h3></header>
+                <button data-href="{bridge}99"></button></article>
         """),
         bridge + "12": httpx.Response(302, headers={"location": detail}),
         detail: httpx.Response(200, text=f"<script>\nvar documentsAttachments = {json.dumps(grid)};\n</script>"),
@@ -32,7 +36,8 @@ def test_berlin_delegated_documents_are_downloaded_for_the_matching_notice(tmp_p
         }),
     }
     recipe = Recipe.model_validate({"list": {"url": listing, "item": "//article"},
-                                    "fields": {"id": "@data-id", "title": "./h3"}})
+                                    "fields": {"id": "./header/h3" if id_from_heading else "@data-id",
+                                               "title": "./header/h3"}})
     db = DB(tmp_path / "berlin.sqlite")
     portal = db.portal_create(listing)
     db.recipe_save(portal, recipe, "attach", 0)
@@ -48,9 +53,11 @@ def test_berlin_delegated_documents_are_downloaded_for_the_matching_notice(tmp_p
             await worker._handle(*worker.queue.get_nowait())
             assert db.portal_get(portal)["state"] == "serving"
             notices = {row["id"]: row for row in db.tenders_for(portal)}
-            assert notices["12"]["url"] == bridge + "12"
-            assert notices["13"]["documents"] == []
-            [file] = notices["12"]["documents"]
+            good_id = "2026-12 Bridge inspection" if id_from_heading else "12"
+            bad_id = "2026-13 Library repairs" if id_from_heading else "13"
+            assert notices[good_id]["url"] == bridge + "12"
+            assert notices[bad_id]["documents"] == []
+            [file] = notices[good_id]["documents"]
             assert file["fileName"] == "specs.pdf"
             assert Path(db.document_get(file["path"].removeprefix("/files/"))["path_on_disk"]).read_bytes() == pdf
             assert [url for _, _, url in fetcher.request_log] == [listing, bridge + "12", detail, document]

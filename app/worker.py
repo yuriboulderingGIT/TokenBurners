@@ -187,8 +187,14 @@ class Worker:
                         portal_id, result.tenders, repaired_recipe=repaired_recipe, repair_cost_usd=repair_cost_usd,
                     )
                     files = sum(len(tender.documents) for tender in result.tenders)
-                    file_label = "document" if files == 1 else "documents"
-                    reason = f"delivering {count} tenders. Latest read verified {files} {file_label}"
+                    reason = f"delivering {count} tenders"
+                    if files:
+                        file_label = "document" if files == 1 else "documents"
+                        reason += f". Latest read verified {files} {file_label}"
+                    elif result.documents_tried:
+                        reason += ". No documents delivered within the file limit"
+                    else:
+                        reason += ". No document links found"
                     states.set_state(self.db, portal_id, states.SERVING, reason, run_id)
                     self.db.run_finish(run_id, "ok", cost_usd=cost)
                     return True

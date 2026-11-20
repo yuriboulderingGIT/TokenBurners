@@ -166,6 +166,8 @@ def _changed_id_problems(tenders: list[Tender], previous: list[Tender]) -> list[
 
 def _document_problems(new: ReadResult) -> list[str]:
     tried, failed = new.documents_tried, new.documents_failed
+    if failed and not any(tender.documents for tender in new.tenders):
+        return [f"no documents delivered. {failed} of {tried} document downloads failed"]
     if (tried >= 2 and failed == tried) or (tried >= 4 and failed > MAX_DOCUMENT_FAILURE_SHARE * tried):
         return [f"{failed} of {tried} document downloads failed"]
     return []

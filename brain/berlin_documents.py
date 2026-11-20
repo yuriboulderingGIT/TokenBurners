@@ -22,7 +22,12 @@ def detail_url(listing_url: str, row: html.HtmlElement, extracted_id: object) ->
         return None
     [card] = cards
     notice_id = card.get("data-id", "")
-    if extracted_id != notice_id or not re.fullmatch(r"[0-9]{1,20}", notice_id):
+    if not re.fullmatch(r"[0-9]{1,20}", notice_id):
+        return None
+    # Older list recipes can use the published reference in the card heading as
+    # the tender ID. Bind the handoff to the same card without renumbering it.
+    headings = [" ".join(node.text_content().split()) for node in card.xpath("./header/h3")]
+    if extracted_id != notice_id and (len(headings) != 1 or extracted_id != headings[0] or not headings[0]):
         return None
     target = _RIB_DETAIL + notice_id
     return target if target in card.xpath(".//button/@data-href") else None

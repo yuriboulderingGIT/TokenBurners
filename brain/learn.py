@@ -20,7 +20,8 @@ from brain.llm import ScopedLLM
 from brain.normalize import normalize
 from brain.run_recipe import (
     MAX_PAGES, MissedNextPage, NoPublicNextLink, Origin, PaginationError, RecipeReadError, advertised_next_urls,
-    _advertised_total_count, canonical_origin, empty_search_url, fetch_page, is_json_response, next_page_controls,
+    _advertised_total_count, _attachment_links, canonical_origin, empty_search_url, fetch_page, is_json_response,
+    next_page_controls,
     document_base, navigation_view, portal_origin, resolve_portal_url, run_recipe,
 )
 from brain.public_search import api_subdomain
@@ -477,9 +478,14 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
         if not _observed_url(preferred, listing, origin):
             preferred = None
             if listing.document is not None:
-                for row in listing.document.xpath("//tr[td[3] and td//a[@href]] | //article[.//header//a[@href]]")[:3]:
+                base = document_base(listing.document, listing.url)
+                for row in listing.document.xpath(
+                    "//tr[td[3] and td//a[@href]] | //article[.//header//a[@href]]"
+                    " | //tr[.//a[contains(@href, 'contract_display_')]]"
+                )[:_SAMPLE_SIZE]:
                     targets = {_observed_url(href, listing, origin) for href in row.xpath(".//a/@href")}
                     targets.discard(None)
+                    targets.difference_update(_attachment_links(row, base), {listing.url})
                     if len(targets) == 1:
                         preferred = targets.pop()
                         break

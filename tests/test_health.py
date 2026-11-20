@@ -90,10 +90,13 @@ def test_shared_list_url_does_not_count_as_changed_ids() -> None:
 
 def test_document_failures() -> None:
     ok = [tender(n) for n in range(1, 11)]
+    ok[0].documents = [Document(fileName="notice.pdf", sizeBytes=10, sha256="abc", path="/files/abc")]
     assert check_health(GOOD, read(ok, documents_tried=10, documents_failed=5)).ok
     assert not check_health(GOOD, read(ok, documents_tried=10, documents_failed=6)).ok
     assert not check_health(GOOD, read(ok, documents_tried=2, documents_failed=2)).ok
-    assert check_health(GOOD, read(ok, documents_tried=1, documents_failed=1)).ok  # one hiccup is not a pattern
+    assert check_health(GOOD, read(ok, documents_tried=2, documents_failed=1)).ok
+    incomplete = check_health(None, read([tender(1)], documents_tried=1, documents_failed=1))
+    assert incomplete.problems == ["no documents delivered. 1 of 1 document downloads failed"]
 
 
 def test_document_links_compared_for_continuing_tenders_with_unchanged_status() -> None:
