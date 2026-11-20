@@ -28,13 +28,13 @@ from app.db import DB
 from app.documents import store_documents
 from app.fetcher import Fetcher, PortalCancelled, PortalFetcher
 from app.health import check_health
-from app.models import ReadResult, Recipe, Tender
+from app.models import Health, ReadResult, Recipe, Tender
 from brain.blocks import Blocked
 from brain.learn import AttachFailed, learn_recipe
 from brain.llm import LLM, BudgetExceeded, LLMUnavailable
 from brain.normalize import normalize
 from brain.repair import repair
-from brain.run_recipe import run_recipe
+from brain.run_recipe import PaginationError, run_recipe
 
 log = logging.getLogger("watchtower.worker")
 
@@ -137,20 +137,25 @@ class Worker:
                 version = self.db.recipe_save(portal_id, recipe, "attach", llm.total_cost)
                 self.db.run_note(run_id, f"recipe v{version} learned by {recipe.learned_by} (${llm.total_cost:.4f})")
 
-            result = await self._execute(portal_id, recipe, fetch)
-            health = check_health(self._previous(portal_id), result)
-            self.db.run_note(run_id, f"read {result.raw_count} list entries, {len(result.tenders)} tenders")
-
-            if health.ok:
-                count = self.db.save_tenders(portal_id, result.tenders)
-                states.set_state(self.db, portal_id, states.SERVING, f"delivering {count} tenders", run_id)
-                self.db.run_finish(run_id, "ok", cost_usd=cost)
-                return
+            pagination_page = None
+            try:
+                result = await self._execute(portal_id, recipe, fetch)
+            except PaginationError as exc:
+                health = Health(ok=False, problems=[str(exc)])
+                pagination_page = exc.page_sample
+            else:
+                health = check_health(self._previous(portal_id), result)
+                self.db.run_note(run_id, f"read {result.raw_count} list entries, {len(result.tenders)} tenders")
+                if health.ok:
+                    count = self.db.save_tenders(portal_id, result.tenders)
+                    states.set_state(self.db, portal_id, states.SERVING, f"delivering {count} tenders", run_id)
+                    self.db.run_finish(run_id, "ok", cost_usd=cost)
+                    return
 
             problems = "; ".join(health.problems)
             self.db.run_finish(run_id, "failed", f"health check failed: {problems}", cost)
             if allow_repair:
-                await self._repair(portal_id, recipe, health, fetch)
+                await self._repair(portal_id, recipe, health, fetch, pagination_page)
             elif retry:
                 states.set_state(self.db, portal_id, states.FAILED, f"still failing on retry: {problems}")
             else:
@@ -187,13 +192,16 @@ class Worker:
         # TODO(A2): count real document failures (store_documents should report them).
         return ReadResult(tenders=tenders, raw_count=len(raws), documents_tried=tried)
 
-    async def _repair(self, portal_id: str, recipe: Recipe, health, fetch: PortalFetcher) -> None:
+    async def _repair(
+        self, portal_id: str, recipe: Recipe, health: Health, fetch: PortalFetcher,
+        pagination_page: dict[str, str] | None = None,
+    ) -> None:
         problems = "; ".join(health.problems)
         repair_run = self.db.run_create(portal_id, "repair")
         states.set_state(self.db, portal_id, states.HEALING, f"repairing after: {problems}", repair_run)
         llm = self.llm.scoped(portal_id, repair_run, "repair")
         try:
-            new_recipe = await repair(recipe, health, fetch, llm)
+            new_recipe = await repair(recipe, health, fetch, llm, pagination_page=pagination_page)
         except (BudgetExceeded, LLMUnavailable) as e:
             self.db.run_finish(repair_run, "failed", str(e), llm.total_cost)
             states.set_state(self.db, portal_id, states.FAILED, f"repair impossible, model unavailable: {e}")
