@@ -116,6 +116,8 @@ Same two teams as plan v1. New task numbers continue plan v1's (P13 and up, B10 
 | B19 | Allow document links on other hosts (still rate limited). | B2 | 1h | A document from another host is delivered |
 | B20 | Optional: after attach or repair, the cheap model compares 2 extracted tenders with their pages (purpose `check`). A mismatch is a health problem. | B1 | 1.5h | Cut first if we are behind |
 
+**B1 implementation update.** B16 now names the supported fields and requests an IANA time zone. B17 checks identifiable tenders against their last healthy IDs before accepting a repaired recipe. The offline B10/B15 rehearsal served five mock tenders and eight files on both layouts and retained them after CAPTCHA stopped the read. Live portal field coverage and model costs are still pending.
+
 **Total:** about 20 person-hours of work, with about 18 available before the feature stop (4 people × 4.5 hours). B19 and B20 happen only if there is time.
 
 ## 5. Timeline and checkpoints (clock times)
@@ -143,6 +145,7 @@ Same two teams as plan v1. New task numbers continue plan v1's (P13 and up, B10 
 ## 6. Model cost and credits
 
 - **Friday update:** the team is reserving its $50 of API credits for Saturday’s demo. Use fixtures for rehearsal. Record live B10, B14 and B15 results and costs only when those runs actually take place.
+- **B1 rehearsal and demo:** from the repository root, run `python -m brain.proof --rehearse` for both mock attaches, layout repair and CAPTCHA. For the live demo, `python -m brain.proof --live` runs those cases plus eTenders, Vergabemarktplatz NRW and DTVP with the configured model. The mock SPA uses Playwright Chromium. Each invocation writes its own `results.json`, tender database and files under `data/proofs/`. Live runs use the application's existing budget ledger in `DATA_DIR` and honor the shared `LLM_BUDGET_USD` cap.
 - **The judges' run is billed to our key.** P13 comes first: one hand-in key in its own OpenAI project with a usage limit. Set `LLM_BUDGET_USD` to that limit minus a margin. It is the total for the whole data folder, shared by all portals.
 - **Models:** `gpt-5-mini` for attach, `gpt-5` for repair (or after the cheap model failed twice). Another model needs a price entry in `brain/llm.py`.
 - **Calls:** a regular read makes no model call. An attach makes up to 4 cheap calls and 1 strong call. A repair makes up to 3 strong calls.
