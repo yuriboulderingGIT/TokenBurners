@@ -174,7 +174,9 @@ class Worker:
             self.db.run_finish(run_id, "failed", cost_usd=cost)
         except Exception as e:
             log.exception("read %s failed", run_id)
-            self._keep_last_good(portal_id, run_id, f"read failed: {type(e).__name__}: {e}")
+            # No repair and no retry = the re-read right after a repair (see "repaired recipe still fails").
+            after_repair = not (allow_repair or retry)
+            self._keep_last_good(portal_id, run_id, f"read failed: {type(e).__name__}: {e}", after_repair)
             self.db.run_finish(run_id, "failed", cost_usd=cost)
 
     async def _execute(self, portal_id: str, recipe: Recipe, fetch: PortalFetcher) -> ReadResult:
@@ -244,16 +246,17 @@ class Worker:
             return None
         return ReadResult(tenders=[Tender.model_validate(t) for t in stored], raw_count=len(stored))
 
-    def _keep_last_good(self, portal_id: str, run_id: str, reason: str) -> None:
+    def _keep_last_good(self, portal_id: str, run_id: str, reason: str, after_repair: bool = False) -> None:
         """A read failed for a reason that isn't the recipe. Be honest about it."""
         portal = self.db.portal_get(portal_id)
         if portal is None:
             return
         if portal["state"] == states.INTEGRATING:
             states.set_state(self.db, portal_id, states.FAILED, reason, run_id)
-        elif portal["state"] == states.HEALING:
+        elif portal["state"] == states.HEALING and after_repair:
             # The re-read after a repair crashed: the new recipe is unproven. The failed-retry
-            # timer tries it again later with a plain read.
+            # timer tries it again later with a plain read. Any other crashed read while healing
+            # (e.g. resumed after a restart) keeps healing; the next timed read may repair.
             states.set_state(self.db, portal_id, states.FAILED, f"re-read after repair failed: {reason}", run_id)
         elif portal["state"] == states.FAILED:
             self.db.portal_update(portal_id, reason=f"still failing on retry: {reason}")

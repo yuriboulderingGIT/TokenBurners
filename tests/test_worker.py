@@ -149,3 +149,19 @@ def test_repair_that_crashes_ends_failed_not_healing(monkeypatch) -> None:
     assert portal["reason"].startswith("repair crashed")
     repair_run = db.one("SELECT result, finished_at FROM runs WHERE portal_id = ? AND kind = 'repair'", (portal_id,))
     assert repair_run["result"] == "failed" and repair_run["finished_at"]
+
+
+def test_crashed_normal_read_while_healing_keeps_healing(monkeypatch) -> None:
+    """E.g. resumed after a restart: not the re-read after a repair, so no jump to failed."""
+    worker = Worker(db, fetcher=FakeFetcher({}), llm=None)
+    portal_id = _serving_portal("https://portal.example/healing-restart")
+    states.set_state(db, portal_id, states.HEALING, "repairing after: no tenders found")
+
+    async def crashing_run_recipe(recipe, fetch):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr("app.worker.run_recipe", crashing_run_recipe)
+    _run_one(worker, portal_id)
+    portal = db.portal_get(portal_id)
+    assert portal["state"] == states.HEALING
+    assert "serving last good tenders" in portal["reason"]

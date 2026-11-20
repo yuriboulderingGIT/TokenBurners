@@ -155,9 +155,35 @@ def test_open_tender_past_its_deadline_is_served_closed() -> None:
 def test_closing_at_deadline_sets_lastchangedat_to_the_deadline() -> None:
     from datetime import timezone
 
-    from app.main import _close_if_past_deadline
+    from app.db import close_if_past_deadline
 
     tender = {"status": "open", "submissionDeadline": "2026-11-20T10:00:00+01:00", "lastChangedAt": "2026-11-01T08:00:00+00:00"}
     now = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
-    assert _close_if_past_deadline(tender, now) == tender | {"status": "closed", "lastChangedAt": "2026-11-20T10:00:00+01:00"}
-    assert _close_if_past_deadline(tender | {"status": "withdrawn"}, now)["status"] == "withdrawn"
+    assert close_if_past_deadline(tender, now) == tender | {"status": "closed", "lastChangedAt": "2026-11-20T10:00:00+01:00"}
+    assert close_if_past_deadline(tender | {"status": "withdrawn"}, now)["status"] == "withdrawn"
+
+
+def test_healthy_read_after_serve_time_close_is_not_a_second_change() -> None:
+    import json
+
+    from app.db import db
+    from app.main import list_tenders
+    from app.models import Tender
+    import asyncio
+
+    portal_id = db.portal_create("https://portal.example/no-double-change")
+    fields = dict(id="T", url="https://portal.example/t", title="T", buyerName="City",
+                  publicationDate="2026-01-01", submissionDeadline="2026-02-01T10:00:00+01:00")
+    db.save_tenders(portal_id, [Tender(status="open", **fields)])
+    # Pretend it was stored long before the deadline passed.
+    row = db.one("SELECT json FROM tenders WHERE portal_id = ? AND id = 'T'", (portal_id,))
+    stored = json.loads(row["json"]) | {"lastChangedAt": "2026-01-10T00:00:00+00:00"}
+    db.execute("UPDATE tenders SET json = ? WHERE portal_id = ? AND id = 'T'", (json.dumps(stored), portal_id))
+
+    served = asyncio.run(list_tenders(portal_id))[0]
+    assert served["status"] == "closed" and served["lastChangedAt"] == "2026-02-01T10:00:00+01:00"
+    db.save_tenders(portal_id, [Tender(status="closed", **fields)])  # the next healthy read
+    assert asyncio.run(list_tenders(portal_id))[0] == served
+
+    db.save_tenders(portal_id, [Tender(status="closed", **(fields | {"title": "T2"}))])  # a real change
+    assert asyncio.run(list_tenders(portal_id))[0]["lastChangedAt"] != served["lastChangedAt"]
