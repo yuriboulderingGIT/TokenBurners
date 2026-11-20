@@ -76,8 +76,9 @@ def test_call_waits_for_a_parallel_call_instead_of_failing(tmp_path, monkeypatch
 
     async def run():
         gate = asyncio.Event()
-        # Room for one call's maximum cost (about $0.0085 for gpt-5-mini here), not for two.
-        model, responses = _llm(db, budget=0.012, gate=gate)
+        # Room for one call's maximum cost (output cap + this tiny prompt on gpt-5-mini), not for two.
+        one_call = (llm_module.MAX_OUTPUT_TOKENS * 2.00 + 2_000 * 0.25) / 1e6
+        model, responses = _llm(db, budget=1.5 * one_call, gate=gate)
         first = asyncio.create_task(model.scoped("p1", None, "attach").json("prompt"))
         await asyncio.sleep(0.05)
         second = asyncio.create_task(model.scoped("p2", None, "attach").json("prompt"))

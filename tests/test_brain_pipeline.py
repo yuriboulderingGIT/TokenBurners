@@ -8,13 +8,53 @@ import httpx
 import pytest
 
 from app.db import DB
-from app.fetcher import Fetcher
+from app.fetcher import FakeFetcher, Fetcher
 from app.models import Recipe
 from app.worker import Worker
 from mock_portal import server
 
 PORTAL_URL = "http://portal.example/tenders"
 FIXTURE = Path(__file__).parents[1] / "testset/fixtures/mock/recipe_v1.json"
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_worker_serves_four_remaining_mock_tenders(tmp_path, monkeypatch, caplog, status):
+    monkeypatch.setattr(server, "STATE", {"layout": "v1", "variant": "ssr"})
+    db = DB(tmp_path / "watchtower.sqlite")
+    portal_id = db.portal_create(PORTAL_URL)
+    recipe = Recipe.model_validate_json(FIXTURE.read_bytes())
+    recipe.list_.url = PORTAL_URL
+    db.recipe_save(portal_id, recipe, "attach", 0)
+    missing = set()
+    mock_portal = httpx.ASGITransport(app=server.app)
+
+    async def respond(request):
+        if request.url.path in missing:
+            return httpx.Response(status)
+        return await mock_portal.handle_async_request(request)
+
+    async def exercise():
+        fetcher = Fetcher(min_interval=0, retries=0, transport=httpx.MockTransport(respond))
+        worker = Worker(db, fetcher, llm=None)
+        try:
+            for minute, expected in enumerate((5, 4)):
+                stamp = f"2026-11-20T18:{minute:02}:00+00:00"
+                monkeypatch.setattr("app.db.now_iso", lambda: stamp)
+                worker.request_read(portal_id)
+                await worker._handle(*worker.queue.get_nowait())
+                assert db.portal_get(portal_id)["state"] == "serving"
+                assert db.runs_for(portal_id)[0]["result"] == "ok"
+                assert len(db.tenders_listed_last(portal_id)) == expected
+                missing.add("/tender/MOCK-001")
+            by_id = {row["id"]: row for row in db.tenders_for(portal_id)}
+            assert by_id["MOCK-001"]["status"] == "closed"
+            assert all(row["kind"] == "read" for row in db.runs_for(portal_id))
+        finally:
+            await fetcher.aclose()
+
+    with caplog.at_level("INFO", logger="brain.run_recipe"):
+        asyncio.run(exercise())
+    assert "1 of 5 tender detail pages" in caplog.text
 
 
 def _recipe_v2() -> dict:
@@ -35,6 +75,39 @@ def _recipe_v2() -> dict:
         "documents": {"link": "//a[@class='doc']/@href"},
         "locale": {"lang": "en", "tz": "Europe/Dublin", "country": "IE"},
     }
+
+
+def test_worker_delivers_document_from_another_host(tmp_path):
+    db = DB(tmp_path / "documents.sqlite")
+    ident = db.portal_create(PORTAL_URL)
+    attachment = "https://downloads.example/spec.pdf"
+    pdf = b"%PDF-1.4 public tender specification"
+    recipe = Recipe.model_validate({
+        "list": {"url": PORTAL_URL, "item": "//li"},
+        "fields": {"id": "@id", "title": "./h2"},
+        "documents": {"link": ".//a/@href"},
+    })
+    db.recipe_save(ident, recipe, "attach", 0)
+
+    async def exercise():
+        fetcher = FakeFetcher({
+            PORTAL_URL: f'<li id="P1"><h2>Roads</h2><a href="{attachment}">Specification</a></li>',
+            attachment: pdf,
+        }, min_interval=0.02)
+        try:
+            worker = Worker(db, fetcher, llm=None)
+            worker.request_read(ident)
+            await worker._handle(*worker.queue.get_nowait())
+            assert db.portal_get(ident)["state"] == "serving"
+            [document] = db.tenders_for(ident)[0]["documents"]
+            stored = db.document_get(document["path"].removeprefix("/files/"))
+            assert Path(stored["path_on_disk"]).read_bytes() == pdf
+            assert [(p, url) for p, _, url in fetcher.request_log] == [(ident, PORTAL_URL), (ident, attachment)]
+            assert fetcher.request_log[1][1] - fetcher.request_log[0][1] >= fetcher.min_interval
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
 
 
 def test_worker_attaches_refreshes_and_repairs(tmp_path, monkeypatch):

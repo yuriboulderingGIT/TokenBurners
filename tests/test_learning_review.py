@@ -4,13 +4,14 @@ import asyncio
 import json
 from urllib.parse import urlsplit
 
+import httpx
 import pytest
 
-from app.fetcher import FakeFetcher
+from app.fetcher import FakeFetcher, Fetcher
 from app.models import Recipe
 from brain.blocks import detect_block
-from brain.learn import RecipeValidationError, learn_recipe, read_page_sample, validate_candidate
-from brain.run_recipe import MAX_PAGES, portal_origin
+from brain.learn import AttachFailed, RecipeValidationError, learn_recipe, read_page_sample, validate_candidate
+from brain.run_recipe import MAX_PAGES, RecipeReadError, portal_origin, run_recipe
 
 _LIST = "http://portal.example/tenders"
 _LIST_HTML = """
@@ -23,6 +24,94 @@ _LIST_HTML = """
 
 _CAPTCHA = '<form><div class="g-recaptcha"></div><button>Continue</button></form>'
 _LOGIN = '<form><input type="password"><button>Continue</button></form>'
+
+
+@pytest.mark.parametrize("total", [1, 500])
+def test_direct_json_entry_cannot_be_misread_as_one_html_row(total):
+    feed = {"total_count": total, "results": [{"id": "T1", "title": "School repairs"}]}
+    html_recipe = Recipe.model_validate({"list": {"url": _LIST, "item": "/html/body/p"}})
+
+    class FeedLLM:
+        model_name = "fixture"
+
+        async def json(self, prompt, **kwargs):
+            assert "endpoints" in json.loads(prompt)
+            return {"endpoint": 0, "recipe": {"list": {"item": "$.results[*]"},
+                                              "fields": {"id": "$.id", "title": "$.title"}}}
+
+    async def exercise():
+        fetcher = FakeFetcher({_LIST: json.dumps(feed)})
+        scoped = fetcher.for_portal("fixture")
+        try:
+            with pytest.raises(RecipeReadError, match="portal returned JSON"):
+                await run_recipe(html_recipe, scoped)
+            if total == 1:
+                assert (await learn_recipe(_LIST, scoped, FeedLLM())).kind == "json_api"
+            else:
+                with pytest.raises(AttachFailed, match="advertised 500 tenders"):
+                    await learn_recipe(_LIST, scoped, FeedLLM())
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_attach_uses_final_origin_for_evidence_and_recipe():
+    entry = "http://portal.example/start"
+    secure = "https://portal.example/start"
+    landing = "https://www.portal.example/home/"
+    listing = "https://www.portal.example/home/notices"
+    redirects = {entry: secure, secure: landing}
+
+    def respond(request):
+        url = str(request.url)
+        if url in redirects:
+            return httpx.Response(301, headers={"location": redirects[url]})
+        return httpx.Response(200, text={landing: '<a href="notices">Tenders</a>', listing: _LIST_HTML}[url])
+
+    class FixtureLLM:
+        model_name = "fixture"
+
+        async def json(self, prompt, **kwargs):
+            evidence = json.loads(prompt)
+            if "entry" in evidence:
+                assert evidence["entry"]["url"] == landing
+                assert evidence["entry"]["links"] == {listing: "Tenders"}
+                return {"list_url": "notices"}
+            assert evidence["list_page"]["url"] == listing
+            return {"list": {"url": listing, "item": "//li"}, "fields": {"id": "@data-id", "title": "./h2"}}
+
+    async def exercise():
+        fetcher = Fetcher(min_interval=0, retries=0, transport=httpx.MockTransport(respond))
+        try:
+            recipe = await learn_recipe(entry, fetcher.for_portal("fixture"), FixtureLLM())
+            assert recipe.list_.url == listing
+            assert [url for _, _, url in fetcher.request_log] == [entry, secure, landing, listing, listing]
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("destination", [
+    "https://other.example", "https://portal.example:8443", "https://user@portal.example",
+    "http://www.portal.example", "https://www.portal.example.other.example",
+])
+def test_attach_rejects_unsafe_redirect_before_request(destination):
+    entry = "https://portal.example/start"
+
+    async def exercise():
+        fetcher = Fetcher(min_interval=0, transport=httpx.MockTransport(
+            lambda _: httpx.Response(302, headers={"location": destination})
+        ))
+        try:
+            with pytest.raises(AttachFailed, match="redirected outside"):
+                await learn_recipe(entry, fetcher.for_portal("fixture"), None)
+            assert [url for _, _, url in fetcher.request_log] == [entry]
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(("markup", "kind"), [

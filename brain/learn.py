@@ -17,7 +17,7 @@ from brain.blocks import Blocked, detect_block
 from brain.llm import ScopedLLM
 from brain.normalize import normalize
 from brain.run_recipe import (
-    MAX_PAGES, Origin, PaginationError, RecipeReadError, fetch_page, portal_origin,
+    MAX_PAGES, Origin, PaginationError, RecipeReadError, fetch_page, is_json_response, portal_origin,
     resolve_portal_url, run_recipe,
 )
 from brain.shrink import shrink
@@ -87,6 +87,15 @@ async def read_page_sample(
     url: str, fetch: PortalFetcher, origin: Origin, *, stored_ids: StoredTenderIds | None = None,
 ) -> PageSample:
     response = await fetch_page(fetch, url, origin)
+    return _page_sample(response, origin, stored_ids, requested_url=url)
+
+
+def _page_sample(
+    response: httpx.Response, origin: Origin, stored_ids: StoredTenderIds | None = None,
+    *, requested_url: str | None = None,
+) -> PageSample:
+    if is_json_response(response):
+        raise RecipeReadError("the portal returned JSON, but the recipe expects HTML")
     current_url = str(response.url)
     page = response.text
     kind = detect_block(page, response.status_code)
@@ -97,7 +106,9 @@ async def read_page_sample(
     except (ValueError, etree.ParserError):
         document = None
     links = _page_links(document, current_url, origin, stored_ids) if document is not None else {}
-    return PageSample(current_url, shrink(page, max_chars=16_000), links, document, url)
+    return PageSample(
+        current_url, shrink(page, max_chars=16_000), links, document, requested_url or current_url,
+    )
 
 
 def _page_links(
@@ -261,7 +272,16 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
     if origin is None:
         raise AttachFailed("portal URL must use HTTP(S) without credentials")
     try:
-        entry = await read_page_sample(clean_url, fetch, origin)
+        response = await fetch_page(fetch, clean_url, origin, entry_redirects=True)
+        origin = portal_origin(str(response.url))
+        assert origin is not None  # fetch_page checked every redirect target.
+        if is_json_response(response):
+            candidate = await discover_json_api(str(response.url), fetch, llm, entry_response=response)
+            if candidate is None:
+                raise RecipeValidationError("the JSON entry contains no usable tender feed")
+            await validate_candidate(candidate, fetch)
+            return candidate
+        entry = _page_sample(response, origin, requested_url=clean_url)
         discovery = await llm.json(
             json.dumps({
                 "task": (

@@ -19,7 +19,7 @@ from brain.llm import ScopedLLM
 from brain.normalize import _single_text
 from brain.run_recipe import (
     Origin, PaginationError, RecipeReadError, _field_value, _navigation_url, _observed_href, _selector,
-    portal_origin,
+    canonical_origin, fetch_page, portal_origin,
 )
 
 MAX_TRIES = 3
@@ -85,7 +85,7 @@ def _check_stored_detail(
             source = detail.document
         elif (
             isinstance(entry, html.HtmlElement)
-            and _observed_href(entry, listing.url, detail.requested_url, origin)
+            and _observed_href(entry, listing.url, detail.requested_url)
             and contains_stored_id(entry, expected)
         ):
             # A row can also link to related tenders. Pair the link with the actual ID on this row.
@@ -112,8 +112,16 @@ async def repair(
     if origin is None:
         return None
     discovery_url = portal_url or recipe.list_.url
-    if recipe.kind == "json_api" and portal_origin(discovery_url) != origin:
-        return None
+    if recipe.kind == "json_api" and (entry_origin := portal_origin(discovery_url)) != origin:
+        if entry_origin is None or not canonical_origin(entry_origin, origin):
+            return None
+        try:
+            response = await fetch_page(fetch, discovery_url, entry_origin, entry_redirects=True)
+        except (RecipeReadError, httpx.HTTPError):
+            return None
+        discovery_url = str(response.url)
+        if portal_origin(discovery_url) != origin:
+            return None
     stored_ids = StoredTenderIds.from_tenders(stored_tenders, recipe) if stored_tenders else None
     if recipe.kind == "html":
         try:

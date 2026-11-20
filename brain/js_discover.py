@@ -18,9 +18,12 @@ from brain.llm import ScopedLLM
 from brain.run_recipe import MAX_PAGES, RecipeReadError, fetch_page, portal_origin
 
 log = logging.getLogger(__name__)
-_MAX_REQUESTS = 16
+_MAX_REQUESTS = 64
 _MAX_ENDPOINTS = 4
 _MAX_RESPONSE_BYTES = 512_000
+_MAX_SCRIPT_BYTES = 4 * 1024 * 1024
+# A chunked application may need the whole request budget at one request per second.
+_PAGE_LOAD_SECONDS = 90
 _JSON_WAIT_SECONDS = 18
 _EXTRA_CAPTURE_SECONDS = 1.25
 _BROWSER_REQUESTS = {"document", "script", "xhr", "fetch"}
@@ -54,9 +57,17 @@ async def discover_json_api(
     *,
     previous_recipe: Recipe | None = None,
     health: Health | None = None,
+    entry_response: httpx.Response | None = None,
 ) -> Recipe | None:
     """Map a public JSON response to a recipe candidate for the caller to validate."""
-    responses = await _capture_json(url, fetch)
+    if entry_response is None:
+        responses = await _capture_json(url, fetch)
+    else:
+        try:
+            payload = entry_response.json()
+        except (ValueError, RecursionError) as exc:
+            raise RecipeReadError("could not parse the portal's JSON entry") from exc
+        responses = [(url, payload)] if isinstance(payload, (dict, list)) else []
     if not responses:
         return None
 
@@ -125,7 +136,7 @@ async def _capture_json(url: str, fetch: PortalFetcher) -> list[tuple[str, dict 
             return
         requests += 1
         try:
-            response = await asyncio.wait_for(fetch_page(fetch, request.url, origin), timeout=_JSON_WAIT_SECONDS)
+            response = await asyncio.wait_for(fetch_page(fetch, request.url, origin), timeout=_PAGE_LOAD_SECONDS)
         except PortalCancelled as exc:
             cancelled = exc
             ready.set()
@@ -147,7 +158,8 @@ async def _capture_json(url: str, fetch: PortalFetcher) -> list[tuple[str, dict 
                 document_block = Blocked(kind)
                 await route.abort()
                 return
-        if len(response.content) > _MAX_RESPONSE_BYTES:
+        byte_limit = _MAX_SCRIPT_BYTES if request.resource_type == "script" else _MAX_RESPONSE_BYTES
+        if len(response.content) > byte_limit:
             await route.abort()
             return
         if request.resource_type in _JSON_REQUESTS and "json" in content_type.lower():
@@ -185,13 +197,16 @@ async def _capture_json(url: str, fetch: PortalFetcher) -> list[tuple[str, dict 
                 await context.route("**/*", handle)
                 await context.route_web_socket("**/*", close_socket)
                 page = await context.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=15_000)
                 try:
-                    await asyncio.wait_for(ready.wait(), timeout=_JSON_WAIT_SECONDS)
-                except TimeoutError:
-                    pass
-                if ready.is_set() and cancelled is None:
-                    await asyncio.sleep(_EXTRA_CAPTURE_SECONDS)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_SECONDS * 1000)
+                    try:
+                        await asyncio.wait_for(ready.wait(), timeout=_JSON_WAIT_SECONDS)
+                    except TimeoutError:
+                        pass
+                    if ready.is_set() and cancelled is None:
+                        await asyncio.sleep(_EXTRA_CAPTURE_SECONDS)
+                finally:
+                    await context.unroute_all(behavior="wait")
             finally:
                 await browser.close()
     except Error as exc:
