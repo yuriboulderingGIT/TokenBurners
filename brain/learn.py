@@ -15,7 +15,7 @@ from brain.blocks import Blocked, detect_block
 from brain.llm import ScopedLLM
 from brain.normalize import normalize
 from brain.run_recipe import (
-    Origin, RecipeReadError, fetch_page, portal_origin, resolve_portal_url, run_recipe,
+    Origin, PaginationError, RecipeReadError, fetch_page, portal_origin, resolve_portal_url, run_recipe,
 )
 from brain.shrink import shrink
 
@@ -97,12 +97,12 @@ async def detail_sample(
 
 
 async def validate_candidate(recipe: Recipe, fetch: PortalFetcher) -> None:
-    """Verify extraction against up to three actual listing entries."""
+    """Check the whole page chain and sample at most three tender details."""
     if not 1 <= recipe.list_.max_pages <= _PAGE_LIMIT:
         raise RecipeValidationError(f"max_pages must be between 1 and {_PAGE_LIMIT}")
     if recipe.documents.steps:
         raise RecipeValidationError("document steps are unsupported; use direct document links")
-    rows = await run_recipe(recipe, fetch, max_tenders=_SAMPLE_SIZE)
+    rows = await run_recipe(recipe, fetch, max_tenders=_SAMPLE_SIZE, verify_all_pages=True)
     if not rows:
         raise RecipeValidationError("the list selector found no tenders")
     normalized = [normalize(row, recipe.locale) for row in rows]
@@ -127,6 +127,7 @@ async def propose_html_recipe(
     strong: bool = False,
     feedback: list[str] | None = None,
     previous: Recipe | None = None,
+    pagination_page: dict[str, str] | None = None,
 ) -> Recipe:
     prompt = {
         "task": (
@@ -145,6 +146,7 @@ async def propose_html_recipe(
         "recipe_schema": Recipe.model_json_schema(),
         "list_page": listing.evidence(),
         "detail_page": detail.evidence() if detail else None,
+        "failing_list_page": pagination_page,
         "previous_recipe": previous.model_dump(by_alias=True) if previous else None,
         "feedback": feedback or [],
     }
@@ -196,11 +198,16 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
         raise AttachFailed(str(exc)) from exc
 
     feedback: list[str] = []
+    pagination_page = None
     for strong in (False, False, True):
         try:
-            return await propose_html_recipe(listing, detail, fetch, llm, strong=strong, feedback=feedback)
+            return await propose_html_recipe(
+                listing, detail, fetch, llm, strong=strong, feedback=feedback, pagination_page=pagination_page
+            )
         except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:
             feedback = [str(exc)]
+            if isinstance(exc, PaginationError) and exc.page_sample:
+                pagination_page = exc.page_sample
     try:
         candidate = await discover_json_api(listing.url, fetch, llm)
         if candidate is not None:

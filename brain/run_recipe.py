@@ -12,6 +12,7 @@ from lxml import etree, html
 from app.fetcher import PortalFetcher
 from app.models import RawTender, Recipe
 from brain.blocks import Blocked, detect_block
+from brain.shrink import shrink
 
 _MAX_PAGES = 100
 _MAX_REDIRECTS = 5
@@ -25,10 +26,22 @@ class RecipeReadError(ValueError):
     """A page or selector prevents the recipe from being read reliably."""
 
 
+class PaginationError(RecipeReadError):
+    """The observed page chain is incomplete. Discard its rows and repair the recipe."""
+
+    def __init__(self, message: str, response: httpx.Response | None = None) -> None:
+        super().__init__(message)
+        self.page_sample = (
+            {"url": str(response.url), "html": shrink(response.text, max_chars=16_000)}
+            if response is not None else None
+        )
+
+
 async def run_recipe(
-    recipe: Recipe, fetch: PortalFetcher, *, max_tenders: int | None = None
+    recipe: Recipe, fetch: PortalFetcher, *, max_tenders: int | None = None,
+    verify_all_pages: bool = False,
 ) -> list[RawTender]:
-    """Run the recipe, optionally stopping after a bounded sample of list entries."""
+    """Sample at most max_tenders details; validation can still verify every list page."""
     if max_tenders is not None and max_tenders < 0:
         raise ValueError("max_tenders must be nonnegative")
     if max_tenders == 0:
@@ -42,7 +55,10 @@ async def run_recipe(
         raise RecipeReadError("recipe list URL must be an HTTP(S) URL without credentials")
     page_url = str(httpx.URL(urldefrag(page_url).url))
     item = _selector(recipe.kind, recipe.list_.item, "list.item")
-    next_page = _selector(recipe.kind, recipe.list_.next_page, "list.next_page")
+    try:
+        next_page = _selector(recipe.kind, recipe.list_.next_page, "list.next_page")
+    except RecipeReadError as exc:
+        raise PaginationError(str(exc)) from exc
     detail = _selector(recipe.kind, recipe.detail.link, "detail.link")
     fields = {
         name: _selector(recipe.kind, expression, name)
@@ -52,19 +68,39 @@ async def run_recipe(
 
     tenders: list[RawTender] = []
     seen_pages: set[str] = set()
-    for _ in range(recipe.list_.max_pages):
+    for page_number in range(1, recipe.list_.max_pages + 1):
         if page_url in seen_pages:
-            raise RecipeReadError("pagination revisited a list page")
+            raise PaginationError("pagination revisited a list page")
         response = await fetch_page(fetch, page_url, origin)
         current_url = str(response.url)
         if current_url in seen_pages:
-            raise RecipeReadError("pagination redirected to a previous list page")
+            raise PaginationError("pagination redirected to a previous list page")
         seen_pages.update((page_url, current_url))
         page = _parse_page(response, recipe.kind)
-        entries = list(_flatten(item(page)))
+        entries = [entry for entry in _flatten(item(page)) if entry is not None]
         if recipe.kind == "html":
             _check_block(response, content_available=bool(entries))
 
+        sample_page = response if recipe.kind == "html" else None
+        if not entries:
+            if page_number > 1:
+                raise PaginationError(f"list.item found no tenders on page {page_number}", sample_page)
+            return []
+        advertised = _advertised_next_urls(page, current_url)
+        try:
+            following = _navigation_url(
+                current_url, next_page(page), origin, "list.next_page", source=page,
+                advertised=advertised,
+            )
+        except RecipeReadError as exc:
+            raise PaginationError(str(exc), sample_page) from exc
+        if advertised and following not in advertised:
+            raise PaginationError(
+                f"list.next_page missed the advertised next page on page {page_number}", sample_page
+            )
+
+        if max_tenders is not None:
+            entries = entries[:max_tenders - len(tenders)]
         for entry in entries:
             source = entry
             tender_url = current_url
@@ -100,15 +136,10 @@ async def run_recipe(
                 else:
                     tender_url = resolve_portal_url(tender_url, values["url"], origin) or tender_url
             tenders.append(RawTender(url=tender_url, fields=values, document_links=document_urls))
-            if max_tenders is not None and len(tenders) >= max_tenders:
-                return tenders
-
-        page_url = _navigation_url(
-            current_url, next_page(page), origin, "list.next_page", source=page
-        )
-        if page_url is None:
+        if following is None or (not verify_all_pages and max_tenders == len(tenders)):
             return tenders
-    raise RecipeReadError("pagination exceeded the recipe's max_pages")
+        page_url = following
+    raise PaginationError("pagination exceeded the recipe's max_pages")
 
 
 def _selector(kind: str, expression: str | None, label: str) -> Selector:
@@ -171,7 +202,8 @@ def _check_block(response: httpx.Response, *, content_available: bool = False) -
 
 
 def _navigation_url(
-    base_url: str, matches: list[Any], origin: Origin, label: str, *, source: Any
+    base_url: str, matches: list[Any], origin: Origin, label: str, *, source: Any,
+    advertised: set[str] | None = None,
 ) -> str | None:
     values = [value for value in _flatten(matches) if value is not None and value != ""]
     if not values:
@@ -182,9 +214,34 @@ def _navigation_url(
     url = resolve_portal_url(base_url, links[0], origin)
     if url is None:
         raise RecipeReadError(f"{label} selected an invalid or off-origin URL")
-    if not _observed_href(source, base_url, url, origin):
+    if not (advertised and url in advertised) and not _observed_href(source, base_url, url, origin):
         raise RecipeReadError(f"{label} selected a URL absent from the page's links")
     return url
+
+
+def _advertised_next_urls(page: Any, base_url: str) -> set[str]:
+    """Independent evidence that treating this listing as the final page would lose rows."""
+    links = []
+    if isinstance(page, html.HtmlElement):
+        for node in page.xpath("descendant-or-self::a[@href] | descendant-or-self::link[@href and @rel]"):
+            if "disabled" in node.attrib or node.get("aria-disabled", "").lower() == "true":
+                continue
+            rel = node.get("rel", "").lower().split()
+            label = " ".join((node.get("aria-label") or node.text_content()).casefold().split())
+            if "next" in rel or label == "next page":
+                links.append(node.get("href"))
+    elif isinstance(page, dict):
+        # A JSON 'next' can also be an opaque cursor. Only explicit URL references count.
+        for container in (page, page.get("links"), page.get("_links")):
+            if isinstance(container, dict):
+                value = container.get("next")
+                if isinstance(value, dict):
+                    value = value.get("href")
+                if isinstance(value, str) and value.startswith(("/", "?", "./", "../", "http://", "https://")):
+                    links.append(value)
+    else:
+        return set()
+    return {url for link in links if (url := _resolve_http_url(base_url, link))}
 
 
 def _observed_href(source: Any, base_url: str, url: str, origin: Origin) -> bool:

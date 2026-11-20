@@ -11,12 +11,15 @@ from brain.learn import (
     RecipeValidationError, detail_sample, propose_html_recipe, read_page_sample, validate_candidate,
 )
 from brain.llm import ScopedLLM
-from brain.run_recipe import RecipeReadError, portal_origin
+from brain.run_recipe import PaginationError, RecipeReadError, portal_origin
 
 MAX_TRIES = 3
 
 
-async def repair(recipe: Recipe, health: Health, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe | None:
+async def repair(
+    recipe: Recipe, health: Health, fetch: PortalFetcher, llm: ScopedLLM, *,
+    pagination_page: dict[str, str] | None = None,
+) -> Recipe | None:
     origin = portal_origin(recipe.list_.url)
     if origin is None:
         return None
@@ -32,7 +35,8 @@ async def repair(recipe: Recipe, health: Health, fetch: PortalFetcher, llm: Scop
         try:
             if recipe.kind == "html":
                 return await propose_html_recipe(
-                    listing, detail, fetch, llm, strong=True, feedback=feedback, previous=recipe
+                    listing, detail, fetch, llm, strong=True, feedback=feedback, previous=recipe,
+                    pagination_page=pagination_page,
                 )
             candidate = await discover_json_api(
                 recipe.list_.url, fetch, llm, previous_recipe=recipe, health=Health(ok=False, problems=feedback)
@@ -46,4 +50,6 @@ async def repair(recipe: Recipe, health: Health, fetch: PortalFetcher, llm: Scop
             return candidate
         except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:
             feedback.append(str(exc))
+            if isinstance(exc, PaginationError) and exc.page_sample:
+                pagination_page = exc.page_sample
     return None

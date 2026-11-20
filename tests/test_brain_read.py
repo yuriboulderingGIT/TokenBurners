@@ -8,6 +8,7 @@ import pytest
 from app.fetcher import FakeFetcher, Fetcher
 from app.models import Locale, RawTender, Recipe
 from brain.blocks import Blocked
+from brain.learn import validate_candidate
 from brain.normalize import normalize
 from brain.run_recipe import RecipeReadError, run_recipe
 from mock_portal.server import CAPTCHA_PAGE, TENDERS, render_detail, render_list
@@ -56,6 +57,74 @@ def test_validation_sample_stops_before_the_next_request() -> None:
     recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
     output = asyncio.run(_read(recipe, _mock_pages(["MOCK-001"]), max_tenders=1))
     assert [tender.fields["id"] for tender in output] == ["MOCK-001"]
+
+
+@pytest.mark.parametrize("selector", [None, "//a[@class='old-pager']/@href"])
+def test_missing_next_selector_rejected_even_with_a_full_sample(selector) -> None:
+    recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
+    recipe.list_.next_page = selector
+    pages = _mock_pages(["MOCK-001", "MOCK-002", "MOCK-003"])
+    with pytest.raises(RecipeReadError, match="next page"):
+        asyncio.run(_read(recipe, pages, max_tenders=3))
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_candidate_checks_page_two_without_fetching_extra_details(broken) -> None:
+    recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
+    pages = _mock_pages(["MOCK-001", "MOCK-002", "MOCK-003"], second_page=True)
+    if broken:
+        pages[f"{_MOCK_ORIGIN}/tenders?page=2"] = render_list(2, layout="v2")
+
+    async def validate():
+        fetcher = FakeFetcher(pages)
+        try:
+            await validate_candidate(recipe, fetcher.for_portal("test"))
+        finally:
+            await fetcher.aclose()
+
+    if broken:
+        with pytest.raises(RecipeReadError, match="page 2"):
+            asyncio.run(validate())
+    else:
+        asyncio.run(validate())
+
+
+def test_json_continuation_with_changed_items_is_incomplete() -> None:
+    url = f"{_MOCK_ORIGIN}/feed"
+    recipe = Recipe.model_validate({
+        "kind": "json_api", "list": {"url": url, "item": "$.items[*]", "next_page": "$.next"},
+        "fields": {"id": "$.id"},
+    })
+    pages = {url: '{"items":[{"id":"a"}],"next":"?p=2"}', url + "?p=2": '{"records":[{"id":"b"}]}'}
+    with pytest.raises(RecipeReadError, match="page 2"):
+        asyncio.run(_read(recipe, pages))
+
+
+def test_json_recipe_must_follow_an_advertised_next_link() -> None:
+    url = f"{_MOCK_ORIGIN}/feed"
+    recipe = Recipe.model_validate({
+        "kind": "json_api", "list": {"url": url, "item": "$.items[*]"},
+        "fields": {"id": "$.id"},
+    })
+    pages = {url: '{"items":[{"id":"a"}],"_links":{"next":{"href":"?p=2"}}}'}
+    with pytest.raises(RecipeReadError, match="missed the advertised next"):
+        asyncio.run(_read(recipe, pages))
+
+
+def test_head_next_link_and_disabled_final_page_control() -> None:
+    url = f"{_MOCK_ORIGIN}/tenders"
+    recipe = Recipe.model_validate({
+        "list": {"url": url, "item": "//li", "next_page": "//link[@rel='next']/@href"},
+        "fields": {"id": "text()"},
+    })
+    pages = {
+        url: '<html><head><link rel="next" href="?p=2"></head><body><ul><li>A</li></ul></body></html>',
+        url + "?p=2": '<ul><li>B</li></ul><a aria-disabled="true" href="?p=3">Next page</a>',
+    }
+    assert [row.fields["id"] for row in asyncio.run(_read(recipe, pages))] == ["A", "B"]
+    recipe.list_.max_pages = 1
+    with pytest.raises(RecipeReadError, match="max_pages"):
+        asyncio.run(_read(recipe, pages))
 
 
 def test_json_recipe_handles_array_paths_and_relative_urls() -> None:
