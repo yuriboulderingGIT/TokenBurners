@@ -85,7 +85,7 @@ def _check_stored_detail(
             source = detail.document
         elif (
             isinstance(entry, html.HtmlElement)
-            and _observed_href(entry, listing.url, detail.requested_url, origin)
+            and _observed_href(entry, listing.url, detail.requested_url)
             and contains_stored_id(entry, expected)
         ):
             # A row can also link to related tenders. Pair the link with the actual ID on this row.
