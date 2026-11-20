@@ -122,3 +122,42 @@ def test_contract() -> None:
         assert r.status_code == 204
         assert client.get(f"/portals/{portal_id}").status_code == 404
         assert portal_id not in {p["id"] for p in client.get("/portals").json()}
+
+
+def test_open_tender_past_its_deadline_is_served_closed() -> None:
+    """Even when no healthy read rewrites it (portal healing or failed)."""
+    import asyncio
+
+    from app.db import db
+    from app.main import list_tenders
+    from app.models import Tender
+
+    portal_id = db.portal_create("https://portal.example/deadline-passed")
+    common = dict(buyerName="City", publicationDate="2026-01-01", status="open")
+    db.save_tenders(portal_id, [
+        Tender(id="PAST", url="https://portal.example/p", title="Past", submissionDeadline="2026-02-01T10:00:00+01:00", **common),
+        Tender(id="FUTURE", url="https://portal.example/f", title="Future", submissionDeadline="2999-01-01T10:00:00+01:00", **common),
+        Tender(id="NONE", url="https://portal.example/n", title="None", submissionDeadline=None, **common),
+    ])
+    stored = {t["id"]: t for t in db.tenders_for(portal_id)}
+    served = {t["id"]: t for t in asyncio.run(list_tenders(portal_id))}
+
+    assert served["PAST"]["status"] == "closed"
+    assert served["FUTURE"]["status"] == served["NONE"]["status"] == "open"
+    assert served["FUTURE"] == stored["FUTURE"]
+    # Stored lastChangedAt (now) is later than the deadline, so it stays: never moves backwards.
+    assert served["PAST"]["lastChangedAt"] == stored["PAST"]["lastChangedAt"]
+    assert stored["PAST"]["status"] == "open"  # serve-time only, the database is untouched
+    since = asyncio.run(list_tenders(portal_id, changedSince="2026-01-15T00:00:00+00:00"))
+    assert {t["id"] for t in since} == {"PAST", "FUTURE", "NONE"}
+
+
+def test_closing_at_deadline_sets_lastchangedat_to_the_deadline() -> None:
+    from datetime import timezone
+
+    from app.main import _close_if_past_deadline
+
+    tender = {"status": "open", "submissionDeadline": "2026-11-20T10:00:00+01:00", "lastChangedAt": "2026-11-01T08:00:00+00:00"}
+    now = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
+    assert _close_if_past_deadline(tender, now) == tender | {"status": "closed", "lastChangedAt": "2026-11-20T10:00:00+01:00"}
+    assert _close_if_past_deadline(tender | {"status": "withdrawn"}, now)["status"] == "withdrawn"
