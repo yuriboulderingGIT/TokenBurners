@@ -83,7 +83,9 @@ async def create_portal(body: CreatePortal, request: Request) -> dict:
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="url must start with http:// or https://")
     worker = _worker(request)
-    existing = db.portal_by_url(url)
+    # ".../tenders" and ".../tenders/" are one portal; keep whichever form was posted first
+    twin = url[:-1] if url.endswith("/") else url + "/"
+    existing = db.portal_by_url(url) or db.portal_by_url(twin)
     if existing is not None and existing["deleted_at"] is None:
         return {"id": existing["id"]}  # same address -> same id
     if existing is not None:
