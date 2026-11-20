@@ -187,7 +187,8 @@ class Worker:
             self._keep_last_good(portal_id, run_id, f"model unavailable: {e}")
             self.db.run_finish(run_id, "failed", cost_usd=cost)
         except AttachFailed as e:
-            states.set_state(self.db, portal_id, states.FAILED, f"could not attach: {e}", run_id)
+            reason = str(e).strip() or "no working extraction recipe was found"
+            states.set_state(self.db, portal_id, states.FAILED, f"could not attach: {reason}", run_id)
             self.db.run_finish(run_id, "failed", cost_usd=cost)
         except Exception as e:
             log.exception("read %s failed", run_id)

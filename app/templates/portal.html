@@ -24,7 +24,7 @@
     <span>Recipe {% if recipes %}<b>v{{ recipes[0].version }}</b>
       ({% for r in recipes %}v{{ r.version }} {{ "learned" if r.created_by == "attach" else "repaired" }} {{ r.created_at|ago }}{{ ", " if not loop.last }}{% endfor %})
       {% else %}<b>none yet</b>{% endif %}</span>
-    <span>Model cost <b>${{ "%.3f"|format(cost) }}</b></span>
+    <span>Model cost <b data-model-cost-usd="{{ cost }}">${{ "%.3f"|format(cost) }}</b></span>
   </div>
   <div class="actions">
     <button class="btn ghost" id="refresh" type="button">Read again now</button>

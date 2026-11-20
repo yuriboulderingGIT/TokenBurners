@@ -20,11 +20,11 @@ FAILED_RETRY_MINUTES = float(os.getenv("FAILED_RETRY_MINUTES", "180"))
 # integrating and is tried again this soon, up to FIRST_READ_TRIES times before it is failed.
 INTEGRATING_RETRY_MINUTES = float(os.getenv("INTEGRATING_RETRY_MINUTES", "5"))
 FIRST_READ_TRIES = int(os.getenv("FIRST_READ_TRIES", "3"))
-WORKER_CONCURRENCY = int(os.getenv("WORKER_CONCURRENCY", "4"))
+WORKER_CONCURRENCY = int(os.getenv("WORKER_CONCURRENCY", "16"))
 
 # Fetcher: politeness rule from the brief is at most 1 request per second per portal.
 # 1.1 s leaves a margin, so network jitter can't make two requests arrive < 1 s apart.
-MIN_REQUEST_INTERVAL = float(os.getenv("MIN_REQUEST_INTERVAL", "1.1"))
+MIN_REQUEST_INTERVAL = max(1.0, float(os.getenv("MIN_REQUEST_INTERVAL", "1.1")))
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
 USER_AGENT = os.getenv("USER_AGENT", "Watchtower/0.1 (public tender monitor)")
 

@@ -1,4 +1,4 @@
-# Public test portals (owner: B2). Checked 2026-11-20.
+# Public test portals (owner: A2). Checked 2026-11-20.
 # verification: direct (fetched notice data), shell (fetched a client-rendered entry point),
 # or documented (verified the portal from primary sources and direct notice data is pending).
 # block applies to the public URL here. A null value means login/captcha could not be assessed.
@@ -26,6 +26,8 @@ portals:
     block: none
     verification: direct
     fixture: fixtures/sell2wales-gb/list.html
+    document_block: login
+    document_block_fixture: fixtures/sell2wales-gb/attachment-policy.txt
     evidence: https://www.sell2wales.gov.wales/sitehelp/help_faq.aspx
     notes: >
       Public result cards contain the reference, OCID, title, buyer and dates.
@@ -87,44 +89,6 @@ portals:
       initial HTML. Anonymous JSON retrieval is unverified. The separately
       documented XML feed requires credentials.
 
-  - name: bekanntmachungsservice-de
-    url: https://oeffentlichevergabe.de/ui/
-    country: DE
-    software: Bekanntmachungsservice
-    kind: spa_json
-    block: none
-    verification: shell
-    evidence: https://oeffentlichevergabe.de/ui/de/publicationPolicy
-    notes: >
-      The public UI returned a JavaScript shell with an empty app element.
-      The official publication policy documents an open-data interface for
-      retrospective notices. No JSON list endpoint was verified.
-
-  - name: bosa-eprocurement-be
-    url: https://www.publicprocurement.be/bda
-    country: BE
-    software: BOSA e-Procurement
-    kind: spa_json
-    block: none
-    verification: shell
-    evidence: https://bosa.belgium.be/en/applications/e-procurement
-    notes: >
-      The Tender Bulletin returned the public JavaScript entry page.
-      Browser-rendered rows and an anonymous JSON feed remain unverified.
-
-  - name: public-contracts-scotland-gb
-    url: https://www.publiccontractsscotland.gov.uk/Search/Search_MainPage.aspx
-    country: GB
-    software: Public Contracts Scotland
-    kind: ssr
-    block: null
-    verification: documented
-    evidence: https://blogs.gov.scot/public-procurement/2024/01/26/working-with-the-scottish-public-sector-how-to-search-for-opportunities-on-public-contracts-scotland/
-    notes: >
-      The Scottish Government documents the public search and notice detail
-      flow. The search listing timed out on direct retrieval and no fixture
-      was captured.
-
   - name: place-fr
     url: https://www.marches-publics.gouv.fr/entreprise
     country: FR
@@ -137,3 +101,33 @@ portals:
       The French state supplier portal offers search followed by individual
       consultation detail pages. The linked official detail was available via
       an indexed copy. The direct portal request returned 503.
+
+  - name: etenders-cy
+    url: "https://www.eprocurement.gov.cy/epps/quickSearchAction.do?searchType=cftFTS&latest=true"
+    country: CY
+    software: European Dynamics ePPS
+    kind: ssr
+    block: none
+    verification: direct
+    fixture: fixtures/etenders-cy/list.html
+    notes: Public list returned HTTP 200. Fixture retains five notice rows. Document access unverified.
+
+  - name: etenders-mt
+    url: "https://www.etenders.gov.mt/epps/quickSearchAction.do?searchType=cftFTS&latest=true"
+    country: MT
+    software: European Dynamics ePPS
+    kind: ssr
+    block: none
+    verification: direct
+    fixture: fixtures/etenders-mt/list.html
+    notes: Public list returned HTTP 200. Fixture retains five notice rows. Document access unverified.
+
+  - name: vergabe-brandenburg-de
+    url: "https://vergabemarktplatz.brandenburg.de/VMPCenter/company/welcome.do"
+    country: DE
+    software: cosinex Vergabemarktplatz
+    kind: ssr
+    block: none
+    verification: direct
+    fixture: fixtures/vergabe-brandenburg-de/list.html
+    notes: Public list returned HTTP 200. Fixture retains five notice rows. Document access unverified.
