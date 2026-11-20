@@ -32,7 +32,7 @@
   </div>
 
   <div class="stack">
-    <section class="panel" aria-label="Tenders">
+    <section class="panel glass" aria-label="Tenders">
       <div class="panel-head"><h2>Tenders</h2>
         <span class="faint">{{ "kept from the last correct read while the portal is " ~ portal.state if portal.state in ("healing", "failed") and tenders else tenders|length ~ " total" }}</span></div>
       <div class="scroll">
@@ -74,7 +74,7 @@
       </div>
     </section>
 
-    <section class="panel" aria-label="Runs">
+    <section class="panel glass" aria-label="Runs">
       <div class="panel-head"><h2>What the system did</h2><span class="faint">every read and repair, newest first</span></div>
       <ul class="feed">
         {% for r in runs %}
