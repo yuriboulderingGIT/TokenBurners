@@ -110,3 +110,26 @@ def test_document_links_compared_for_continuing_tenders_with_unchanged_status() 
     # Links can still be present when files were skipped for size. One removal is routine.
     health = check_health(before, read(after, tender_ids_with_document_links={"T-0", "T-1"}))
     assert health.ok and not health.missing_document_ids
+
+
+def test_small_boamp_list_accepts_new_notices_with_no_deadline():
+    import json
+    from pathlib import Path
+
+    from app.models import Locale, RawTender
+    from brain.normalize import normalize
+
+    path = Path(__file__).parents[1] / "testset/fixtures/boamp-fr/list.json"
+    records = json.loads(path.read_text())["results"]
+    tenders = [
+        normalize(RawTender(url=r["url_avis"], fields={
+            "id": r["idweb"], "title": r["objet"], "buyerName": r["nomacheteur"],
+            "submissionDeadline": r["datelimitereponse"], "publicationDate": r["dateparution"],
+        }), Locale(country="FR")) for r in records
+    ]
+    before = read([t for t in tenders if t.submissionDeadline])
+    assert len(before.tenders) == 1 and len(tenders) == 3
+    assert check_health(before, read(tenders)).ok
+    # The same portal losing the one deadline it previously displayed still matters.
+    after = read([t.model_copy(update={"submissionDeadline": None}) for t in tenders])
+    assert not check_health(before, after).ok

@@ -1,6 +1,6 @@
 """The ONLY way to make HTTP calls. OWNER: A1.
 
-- At most 1 request per second per portal, shared by pages, documents AND the browser
+- At most 1 request per second per portal and per destination host, shared by pages, documents AND the browser
   (Playwright code must call `wait_turn()` before letting a request through).
 - Timeouts and retries with backoff.
 - DELETE /portals/{id} calls `cancel()`: the next request for that portal raises
@@ -73,8 +73,10 @@ class Fetcher:
             transport=transport,
             headers={"User-Agent": USER_AGENT},
         )
-        self._locks: dict[str, asyncio.Lock] = {}
-        self._last: dict[str, float] = {}
+        self._portal_last: dict[str, float] = {}
+        self._host_last: dict[str, float] = {}
+        self._portal_locks: dict[str, asyncio.Lock] = {}
+        self._host_locks: dict[str, asyncio.Lock] = {}
         self._cancelled: set[str] = set()
         self.request_log: deque[tuple[str, float, str]] = deque(maxlen=2000)  # (portal, time, url)
 
@@ -91,15 +93,18 @@ class Fetcher:
         """Block until this portal may make its next request. Every request must call this."""
         if portal_id in self._cancelled:
             raise PortalCancelled(portal_id)
-        lock = self._locks.setdefault(portal_id, asyncio.Lock())
-        async with lock:
-            # Loop: timers can wake a few ms early (notably on Windows).
-            while (wait := self._last.get(portal_id, 0.0) + self.min_interval - time.monotonic()) > 0:
+        host = httpx.URL(url).raw_host.decode("ascii").rstrip(".")
+        portal_lock = self._portal_locks.setdefault(portal_id, asyncio.Lock())
+        host_lock = self._host_locks.setdefault(host, asyncio.Lock())
+        async with portal_lock, host_lock:
+            last = max(self._portal_last.get(portal_id, 0), self._host_last.get(host, 0))
+            while (wait := last + self.min_interval - time.monotonic()) > 0:
                 await asyncio.sleep(wait + 0.005)
             if portal_id in self._cancelled:
                 raise PortalCancelled(portal_id)
-            self._last[portal_id] = time.monotonic()
-            self.request_log.append((portal_id, self._last[portal_id], url))
+            now = time.monotonic()
+            self._portal_last[portal_id] = self._host_last[host] = now
+            self.request_log.append((portal_id, now, url))
 
     async def get(
         self, portal_id: str, url: str, *, follow_redirects: bool = True, **kw

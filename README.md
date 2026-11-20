@@ -1,64 +1,36 @@
-# Watchtower — TokenBurners · Patterno track · MAIN Hackathon 2026
+# Watchtower
 
-<!-- OWNER: A2 (P11). One page for the judges. Fill in the TODOs with measured numbers. -->
-
-Give Watchtower the address of a public-tender portal it has never seen. It delivers every
-open tender with its documents, notices when the portal stops delivering correctly, and
-repairs itself without any human help.
-
-## How it works
-
-1. **Attach (LLM, once per portal):** explore the portal and write a *recipe*, i.e. XPaths
-   or a JSON API description, then test it on 3 tenders.
-2. **Read (no LLM):** plain code runs the recipe, cleans the fields and downloads documents.
-   Regular reads cost nothing.
-3. **Health check after every read.** Only a healthy read leads to `serving`.
-4. **Repair (LLM):** when checks fail, the portal goes to `healing`. The model rewrites the
-   recipe (max 3 tries) while the API keeps serving the last correct tenders.
-   If it can't be repaired, or a login or captcha blocks it, the portal goes to `failed`
-   with a reason in plain words. A crash during repair also ends in `failed`, never a stuck
-   `healing`. Failed portals get a plain re-read (no model cost) every `FAILED_RETRY_MINUTES`.
-5. **Deadlines are live:** an open tender whose deadline has passed is served as `closed`
-   right away, even while its portal is `healing` or `failed`. Its `lastChangedAt` is the
-   deadline, so `changedSince` clients see the change.
-
-Posting the same portal address twice (also with or without a trailing `/`) returns the same id.
-A refresh while a read or repair is running returns that run's id.
+Watchtower monitors public tender portals. Give it a listing address in the dashboard or with `POST /portals`. A background worker asks a model for an extraction recipe, tests it on a sample, then follows the listing and downloads its documents. The dashboard shows each portal's state, tenders, files, read history and model spend.
 
 ## Run
 
-```bash
+```sh
+cp .env.example .env    # set OPENAI_API_KEY in the local copy
 docker build -t watchtower .
-docker run -p 8080:8080 -e OPENAI_API_KEY=... -v watchtower-data:/data watchtower
+docker run -p 8080:8080 --env-file .env -v watchtower-data:/data watchtower
 ```
 
-API and dashboard: http://localhost:8080. Everything (SQLite database, documents, LLM cache)
-lives in `/data`; mount a volume to keep it across restarts.
+Open <http://localhost:8080> for the dashboard or <http://localhost:8080/docs> for the API. The volume keeps SQLite, document bytes and the recipe-response cache across restarts. If reusing an older local `.env`, remove its `DATA_DIR=./data` line before running Docker.
 
-**Politeness:** every HTTP request, including each redirect hop, document download and browser
-request, goes through one rate limiter: at most 1 request per second per portal.
+A regular read runs the saved recipe in plain code. Watchtower spaces requests from each portal and to each destination host, including document downloads and redirects. It checks identifiers, field coverage, listing counts and document delivery. If a recipe breaks, the portal enters `healing` and continues to serve its last healthy snapshot. A successful repair restores delivery. Login and captcha gates produce `failed` with a reason.
 
-## Environment variables
+## Settings
 
-| Name | Required | Default | Meaning |
-|---|---|---|---|
-| `OPENAI_API_KEY` | yes | | OpenAI key (handed over at submission) |
-| `OPENAI_MODEL` | no | `gpt-5-mini` | Cheap model for attach |
-| `OPENAI_MODEL_STRONG` | no | `gpt-5` | Strong model for repair |
-| `LLM_BUDGET_USD` | no | `5` | Shared budget for completed and in-flight model calls |
-| `REFRESH_MINUTES` | no | `15` | How often each portal is re-read |
-| `FAILED_RETRY_MINUTES` | no | `180` | How often a failed portal is retried (plain read, no repair) |
-| `WORKER_CONCURRENCY` | no | `4` | Portals read at the same time |
-| `MIN_REQUEST_INTERVAL` | no | `1.1` | Seconds between requests to one portal (rule: at least 1) |
-| `HTTP_TIMEOUT` | no | `30` | Seconds before one HTTP request gives up |
-| `DATA_DIR` | no | `/data` | Where the database and documents are stored |
+| Environment variable | Default | Use |
+|---|---|---|
+| `OPENAI_API_KEY` | required | Project key used for learning and repair |
+| `OPENAI_MODEL` / `OPENAI_MODEL_STRONG` | `gpt-5-mini` / `gpt-5` | Attach and repair models |
+| `LLM_BUDGET_USD` | `5` | Maximum cumulative modeled spend per persistent data folder, including reservations |
+| `LLM_CACHE` | `1` | Reuse identical model answers |
+| `REFRESH_MINUTES` / `FAILED_RETRY_MINUTES` | `15` / `180` | Healthy refresh and failed-portal retry intervals |
+| `WORKER_CONCURRENCY` | `16` | Maximum concurrent portal workers |
+| `MIN_REQUEST_INTERVAL` / `HTTP_TIMEOUT` | `1.1` / `30` | Minimum spacing (at least one second) and HTTP timeout in seconds |
+| `DATA_DIR` | `/data` in Docker, `./data` locally | Persistent storage |
 
-## Model cost per portal
+Use a dedicated funded API project for hand-in. Suggested budgets are $5 for development and a $12 project limit with `LLM_BUDGET_USD=10` for judging. The application budget applies to a single data folder. Give the judges the project key privately. [Project and spending controls](https://help.openai.com/en/articles/9186755-managing-projects-in-the-api-platform)
 
-Each model request reserves its maximum estimated cost in SQLite. Once OpenAI reports
-usage, Watchtower records the cost and releases the reservation. If a request is
-interrupted before usage is known, its reservation stays in `llm_reservations` across
-restarts. The default models and their dated snapshots have configured prices in
-`brain/llm.py`. Additional models need a price entry before they can spend the budget.
+## Measured model cost
 
-TODO(A2): measured from the `llm_calls` table: attach $…, repair $…, regular read $0.
+On 20 November the real model attached to the mock for **$0.005485** and delivered five tenders with eight documents. A regular refresh of those tenders cost **$0** (zero model calls). After a layout change, one GPT-5 repair cost **$0.028319** and restored the same five IDs and eight documents. The successful Cyprus attach cost **$0.019190** for ten tenders and four documents. These are individual measurements. Across the ten public portals, one reached `serving` and nine failed. The report includes spend on unsuccessful attempts. [A1/A2 live results](testset/results.md) · [Earlier B14 live results](testset/b14-results.md)
+
+With a running container and the Python requirements installed, `python testset/run_all.py` registers the ten public portals and writes the report. Pass `--db PATH` to include measured cost per completed operation. For an isolated run with the mock, use `bash testset/run_session.sh .env data/validation` after building the image. The dashboard uses port 18080 during the run. Reuse the same data folder to preserve the spending ledger.
