@@ -8,6 +8,15 @@
 
 Brain code receives a PortalFetcher (already bound to one portal), so it never has to
 pass portal ids around:  `await fetch.get(url)`.
+
+Notes for other agents:
+- Never use httpx/requests/urllib directly anywhere else: that breaks the 1 req/s rule.
+- Redirects are followed here, one rate-limited hop at a time. Don't pass follow_redirects.
+- get() retries 429/5xx itself and returns the final response; check status_code yourself.
+- Don't catch PortalCancelled (or bare Exception around fetch calls without re-raising it):
+  the worker needs it to stop work on a deleted portal.
+- Documents: use stream(url, max_bytes, dest_dir); it never holds a file in memory and
+  returns TooLarge instead of raising when the cap is passed.
 """
 
 import asyncio

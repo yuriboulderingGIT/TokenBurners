@@ -22,10 +22,14 @@ repairs itself without any human help.
 
 ```bash
 docker build -t watchtower .
-docker run -p 8080:8080 -e OPENAI_API_KEY=... watchtower
+docker run -p 8080:8080 -e OPENAI_API_KEY=... -v watchtower-data:/data watchtower
 ```
 
-API and dashboard: http://localhost:8080
+API and dashboard: http://localhost:8080. Everything (SQLite database, documents, LLM cache)
+lives in `/data`; mount a volume to keep it across restarts.
+
+**Politeness:** every HTTP request, including each redirect hop, document download and browser
+request, goes through one rate limiter: at most 1 request per second per portal.
 
 ## Environment variables
 
@@ -36,6 +40,10 @@ API and dashboard: http://localhost:8080
 | `OPENAI_MODEL_STRONG` | no | `gpt-5` | Strong model for repair |
 | `LLM_BUDGET_USD` | no | `5` | Total model budget; calls stop beyond it |
 | `REFRESH_MINUTES` | no | `15` | How often each portal is re-read |
+| `WORKER_CONCURRENCY` | no | `4` | Portals read at the same time |
+| `MIN_REQUEST_INTERVAL` | no | `1.1` | Seconds between requests to one portal (rule: at least 1) |
+| `HTTP_TIMEOUT` | no | `30` | Seconds before one HTTP request gives up |
+| `DATA_DIR` | no | `/data` | Where the database and documents are stored |
 
 ## Model cost per portal
 

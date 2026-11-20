@@ -5,6 +5,17 @@
 - A timer re-reads every portal every REFRESH_MINUTES.
 - Pipeline per read:  attach (first time) -> run_recipe -> normalize -> documents ->
   health check -> store + serving,  or  healing -> repair -> re-read -> serving | failed.
+
+Notes for other agents (Brain code called from here):
+- Raise, don't return error values. The worker turns each exception into a state + reason:
+    Blocked (brain/blocks.py)            -> failed, "blocked: ..."
+    AttachFailed (brain/learn.py)        -> failed, "could not attach: ..."
+    BudgetExceeded / LLMUnavailable      -> keep last good tenders, reason says so
+    PortalCancelled (app/fetcher.py)     -> portal was deleted, run stops quietly
+    anything else                        -> keep last good tenders, reason names the error
+- repair() returning None means "gave up" -> failed.
+- Exception messages end up in `reason` on the dashboard: write them in plain words.
+- Only a healthy read is stored, so healing keeps serving the last correct tenders.
 """
 
 import asyncio
