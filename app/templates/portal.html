@@ -4,32 +4,31 @@
 {% block content %}
   <a class="crumb" href="/">← All portals</a>
 {% if portal is none %}
-  <div class="title"><h1>Portal not found</h1></div>
+  <div class="page-head"><h1>Portal not found</h1></div>
   <p class="muted">It may have been removed. Go back to the <a href="/">portal monitor</a>.</p>
 {% else %}
-  <div class="title {{ portal.state }}">
-    <h1>{{ host }}</h1>
-    <span class="pill"><i class="dot"></i>{{ portal.state }}</span>
+  <div class="page-head {{ portal.state }}">
+    <div class="page-title">
+      <h1>{{ host }}</h1>
+      <span class="pill"><i class="dot"></i>{{ portal.state }}</span>
+    </div>
+    <div class="actions">
+      <button class="btn ghost" id="refresh" type="button">Read again now</button>
+      <button class="btn ghost danger" id="remove" type="button">Remove portal</button>
+    </div>
   </div>
-  <div class="facts">
-    <span title="{{ portal.url }}"><a href="{{ portal.url }}" rel="noopener" target="_blank">{{ portal.url }}</a></span>
-  </div>
-  <div class="facts">
-    <span>{{ portal.reason or "no reason recorded" }}</span>
-  </div>
-  <div class="facts">
-    <span><b>{{ open_count }}</b> open of <b>{{ tenders|length }}</b> tenders</span>
-    <span><b>{{ doc_count }}</b> documents</span>
-    <span>Last good read <b title="{{ portal.last_success_at or '' }}">{{ portal.last_success_at|ago }}</b></span>
-    <span>Recipe {% if recipes %}<b>v{{ recipes[0].version }}</b>
-      ({% for r in recipes %}v{{ r.version }} {{ "learned" if r.created_by == "attach" else "repaired" }} {{ r.created_at|ago }}{{ ", " if not loop.last }}{% endfor %})
-      {% else %}<b>none yet</b>{% endif %}</span>
-    <span>Model cost <b data-model-cost-usd="{{ cost }}">${{ "%.3f"|format(cost) }}</b></span>
-  </div>
-  <div class="actions">
-    <button class="btn ghost" id="refresh" type="button">Read again now</button>
-    <button class="btn ghost danger" id="remove" type="button">Remove portal</button>
-  </div>
+  <p class="portal-url"><a href="{{ portal.url }}" rel="noopener" target="_blank" title="{{ portal.url }}">{{ portal.url }}</a></p>
+  <p class="portal-reason {{ portal.state }}">{{ portal.reason or "no reason recorded" }}</p>
+
+  <dl class="summary facts">
+    <div class="cell"><dt>Open tenders</dt><dd><b>{{ open_count }}</b><span class="s">of {{ tenders|length }} held</span></dd></div>
+    <div class="cell"><dt>Documents</dt><dd><b>{{ doc_count }}</b><span class="s">stored and unpacked</span></dd></div>
+    <div class="cell"><dt>Last good read</dt><dd><b title="{{ portal.last_success_at or '' }}">{{ portal.last_success_at|ago }}</b><span class="s">reads every 15 min</span></dd></div>
+    <div class="cell"><dt>Recipe</dt><dd>{% if recipes %}<b>v{{ recipes[0].version }}</b>
+      <span class="s">{% for r in recipes %}v{{ r.version }} {{ "learned" if r.created_by == "attach" else "repaired" }} {{ r.created_at|ago }}{{ ", " if not loop.last }}{% endfor %}</span>
+      {% else %}<b class="none">none yet</b><span class="s">still learning</span>{% endif %}</dd></div>
+    <div class="cell"><dt>Model cost</dt><dd><b data-model-cost-usd="{{ cost }}">${{ "%.3f"|format(cost) }}</b><span class="s">attach and repairs</span></dd></div>
+  </dl>
 
   <div class="stack">
     <section class="panel" aria-label="Tenders">
@@ -80,11 +79,12 @@
         {% for r in runs %}
         {% set lines = (r.notes or "").strip().splitlines() %}
         {% set st = "serving" if r.result == "ok" else "failed" if r.result == "failed" else "integrating" %}
-        <li class="{{ 'healing' if r.kind == 'repair' and r.result == 'ok' else st }}">
+        {% set routine = r.kind == "read" and r.result == "ok" %}
+        <li class="{{ 'healing' if r.kind == 'repair' and r.result == 'ok' else st }}{{ ' routine' if routine }}">
           <i class="dot"></i>
-          <span class="what">{{ r.kind|capitalize }} {{ r.result or "running" }}{% if r.model_cost_usd %} <span class="faint">· ${{ "%.4f"|format(r.model_cost_usd) }}</span>{% endif %}</span>
-          <span class="when" title="{{ r.started_at }}">{{ r.started_at|ago }}{% if r.took %} · took {{ r.took }}{% endif %}</span>
-          {% if lines %}<details><summary>{{ lines[-1].split("] ", 1)[-1] }}</summary><pre>{{ r.notes }}</pre></details>{% endif %}
+          <span class="what">{{ r.kind|capitalize }} {{ r.result or "running" }}{% if r.model_cost_usd %} <span class="faint">${{ "%.4f"|format(r.model_cost_usd) }}</span>{% endif %}</span>
+          <span class="when" title="{{ r.started_at }}">{{ r.started_at|ago }}{% if r.took %}, took {{ r.took }}{% endif %}</span>
+          {% if lines and not routine %}<details><summary>{{ lines[-1].split("] ", 1)[-1] }}</summary><pre>{{ r.notes }}</pre></details>{% endif %}
         </li>
         {% else %}
         <li class="empty">No runs yet.</li>
