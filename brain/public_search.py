@@ -14,6 +14,10 @@ from app.models import SearchTransport
 from brain.run_recipe import MAX_PAGES, PaginationError, RecipeReadError, _advertised_total_count, portal_origin
 
 
+# Session-bound tokens a page's code sends with its requests; observed afresh on every visit.
+ANTI_FORGERY_HEADERS = re.compile(r"(?:x-)?(?:csrf|xsrf)-?token|(?:x-)?requestverificationtoken", re.I)
+
+
 class PublicVisit:
     """Isolate a listing's session cookies while sharing the normal fetcher's rate limiter."""
 
@@ -21,12 +25,19 @@ class PublicVisit:
         self.fetch = fetch
         self.cookies = httpx.Cookies()
 
-    async def get(self, url, **kwargs):
+    async def get(self, url, *, headers=None, **kwargs):
         request = httpx.Request("GET", url)
         self.cookies.set_cookie_header(request)
-        response = await self.fetch.get(url, headers={"Cookie": request.headers.get("cookie", "")}, **kwargs)
+        headers = {**(headers or {}), "Cookie": request.headers.get("cookie", "")}
+        response = await self.fetch.get(url, headers=headers, **kwargs)
         self.cookies.extract_cookies(response)
         return response
+
+
+def api_subdomain(page, target) -> bool:
+    """An HTTPS child host of the portal's own host, such as api.portal.example for portal.example."""
+    return bool(page and target and page[0] == target[0] == "https" and page[2] == target[2] == 443
+                and target[1].endswith("." + page[1]))
 
 
 def eligible_endpoint(page_url: str, url: str) -> bool:
@@ -36,8 +47,7 @@ def eligible_endpoint(page_url: str, url: str) -> bool:
     if any(re.search("token|session|password|secret|key|signature", key, re.I)
            for key, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)):
         return False
-    if target != page and not (page[0] == target[0] == "https" and page[2] == target[2] == 443
-                               and target[1].endswith("." + page[1])):
+    if target != page and not api_subdomain(page, target):
         return False
     # Only anonymous XHR/fetch requests to identifiable read operations qualify.
     path = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
@@ -52,6 +62,7 @@ class ObservedSearch:
     params: dict = field(repr=False)
     visit: PublicVisit = field(repr=False)
     source_total: int = 0
+    headers: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def observe(cls, source, request, visit, total):
@@ -82,7 +93,8 @@ class ObservedSearch:
             return None
         path, key = fields[0] if fields else (None, None)
         spec = SearchTransport(endpoint=request.url, media_type=media, page_field=key, page_path=path or None)
-        return cls(spec, params, visit, total)
+        headers = {k: v for k, v in request.headers.items() if ANTI_FORGERY_HEADERS.fullmatch(k)}
+        return cls(spec, params, visit, total, headers)
 
     async def read(self, index: int, offset: int):
         params = json.loads(json.dumps(self.params))
@@ -103,7 +115,7 @@ class ObservedSearch:
         url = self.spec.endpoint
         for _ in range(4):
             response = await self.visit.fetch.public_search(url, content=body, media_type=self.spec.media_type,
-                                                          cookies=self.visit.cookies)
+                                                          cookies=self.visit.cookies, headers=self.headers)
             self.visit.cookies.extract_cookies(response)
             if response.status_code not in (307, 308):
                 break
