@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS documents (
     file_name TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
-    path_on_disk TEXT NOT NULL
+    path_on_disk TEXT NOT NULL,
+    source_url TEXT                    -- the link it came from (ZIP members share their archive's link)
 );
 CREATE TABLE IF NOT EXISTS llm_calls (
     portal_id TEXT,
@@ -101,6 +102,16 @@ class DB:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Bring databases created by older versions up to the current schema."""
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(documents)")}
+        if "source_url" not in columns:
+            self._conn.execute("ALTER TABLE documents ADD COLUMN source_url TEXT")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS documents_by_source ON documents (portal_id, tender_id, source_url)"
+        )
 
     # ----- low level -----
 
@@ -262,6 +273,15 @@ class DB:
         rows = self.all("SELECT json FROM tenders WHERE portal_id = ? ORDER BY id", (portal_id,))
         return [json.loads(r["json"]) for r in rows]
 
+    def tenders_listed_last(self, portal_id: str) -> list[dict[str, Any]]:
+        """The tenders the last healthy read actually saw (not older ones kept as closed)."""
+        rows = self.all(
+            "SELECT json FROM tenders WHERE portal_id = ? AND last_seen_at = "
+            "(SELECT MAX(last_seen_at) FROM tenders WHERE portal_id = ?) ORDER BY id",
+            (portal_id, portal_id),
+        )
+        return [json.loads(r["json"]) for r in rows]
+
     def save_tenders(self, portal_id: str, tenders: list[Tender]) -> int:
         """Store a healthy read. Changed tenders get a new lastChangedAt.
 
@@ -318,18 +338,26 @@ class DB:
     # ----- documents -----
 
     def document_add(
-        self, portal_id: str, tender_id: str, file_name: str, size_bytes: int, sha256: str, path_on_disk: str
+        self, portal_id: str, tender_id: str, file_name: str, size_bytes: int, sha256: str,
+        path_on_disk: str, source_url: str | None = None, file_id: str | None = None,
     ) -> str:
-        file_id = new_id()
+        file_id = file_id or new_id()
         self.execute(
-            "INSERT INTO documents (file_id, portal_id, tender_id, file_name, size_bytes, sha256, path_on_disk) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (file_id, portal_id, tender_id, file_name, size_bytes, sha256, path_on_disk),
+            "INSERT INTO documents (file_id, portal_id, tender_id, file_name, size_bytes, sha256, "
+            "path_on_disk, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (file_id, portal_id, tender_id, file_name, size_bytes, sha256, path_on_disk, source_url),
         )
         return file_id
 
     def document_get(self, file_id: str) -> sqlite3.Row | None:
         return self.one("SELECT * FROM documents WHERE file_id = ?", (file_id,))
+
+    def documents_from_source(self, portal_id: str, tender_id: str, source_url: str) -> list[sqlite3.Row]:
+        """Files already stored for this tender from this link, in the order they were added."""
+        return self.all(
+            "SELECT * FROM documents WHERE portal_id = ? AND tender_id = ? AND source_url = ? ORDER BY rowid",
+            (portal_id, tender_id, source_url),
+        )
 
     # ----- model cost -----
 

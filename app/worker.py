@@ -180,17 +180,25 @@ class Worker:
     async def _execute(self, portal_id: str, recipe: Recipe, fetch: PortalFetcher) -> ReadResult:
         raws = await run_recipe(recipe, fetch)
         tenders: list[Tender] = []
-        tried = 0
+        tried = failed = blocked = 0
+        block_kind: str | None = None
         for raw in raws:
             tender = normalize(raw, recipe.locale)
             if tender is None:
                 continue
             if raw.document_links:
-                tried += len(raw.document_links)
-                tender.documents = await store_documents(portal_id, tender, raw.document_links, fetch)
+                links = list(dict.fromkeys(raw.document_links))
+                stored = await store_documents(self.db, portal_id, tender, links, fetch)
+                tender.documents = stored.documents
+                tried += len(links)
+                failed += stored.failed + stored.blocked
+                blocked += stored.blocked
+                block_kind = block_kind or stored.block_kind
             tenders.append(tender)
-        # TODO(A2): count real document failures (store_documents should report them).
-        return ReadResult(tenders=tenders, raw_count=len(raws), documents_tried=tried)
+        if tried and blocked == tried:
+            # Every document sits behind a login or captcha: the portal can't be delivered.
+            raise Blocked(block_kind or "login", "the tender documents can't be downloaded without it")
+        return ReadResult(tenders=tenders, raw_count=len(raws), documents_tried=tried, documents_failed=failed)
 
     async def _repair(
         self, portal_id: str, recipe: Recipe, health: Health, fetch: PortalFetcher,
@@ -206,6 +214,19 @@ class Worker:
             self.db.run_finish(repair_run, "failed", str(e), llm.total_cost)
             states.set_state(self.db, portal_id, states.FAILED, f"repair impossible, model unavailable: {e}")
             return
+        except Blocked:
+            # _read turns this into failed + reason; the repair run must not stay "running".
+            self.db.run_finish(repair_run, "failed", "stopped: the portal now asks for a login or captcha", llm.total_cost)
+            raise
+        except PortalCancelled:
+            self.db.run_finish(repair_run, "failed", "stopped: portal was deleted", llm.total_cost)
+            raise
+        except Exception as e:
+            # Never leave a portal in "healing" forever.
+            log.exception("repair for %s crashed", portal_id)
+            self.db.run_finish(repair_run, "failed", f"repair crashed: {type(e).__name__}: {e}", llm.total_cost)
+            states.set_state(self.db, portal_id, states.FAILED, f"repair crashed ({type(e).__name__}) after: {problems}")
+            return
         if new_recipe is None:
             self.db.run_finish(repair_run, "failed", "repair gave up", llm.total_cost)
             states.set_state(self.db, portal_id, states.FAILED, f"repair gave up after: {problems}")
@@ -216,7 +237,8 @@ class Worker:
         await self._read(portal_id, reread, allow_repair=False)
 
     def _previous(self, portal_id: str) -> ReadResult | None:
-        stored = self.db.tenders_for(portal_id)
+        """What the last healthy read saw. Tenders kept as closed after they left the list don't count."""
+        stored = self.db.tenders_listed_last(portal_id)
         if not stored:
             return None
         return ReadResult(tenders=[Tender.model_validate(t) for t in stored], raw_count=len(stored))
