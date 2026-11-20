@@ -128,7 +128,8 @@ async def refresh_portal(portal_id: str, request: Request) -> dict:
 @app.get("/portals/{portal_id}/tenders")
 async def list_tenders(portal_id: str, changedSince: str | None = None) -> list[dict]:
     _portal_or_404(portal_id)
-    tenders = db.tenders_for(portal_id)
+    now = datetime.now(timezone.utc)
+    tenders = [_close_if_past_deadline(t, now) for t in db.tenders_for(portal_id)]
     if changedSince is None:
         return tenders
     try:
@@ -177,6 +178,18 @@ async def dashboard(request: Request):
             "now": datetime.now(timezone.utc).strftime("%H:%M:%S"),
         },
     )
+
+
+def _close_if_past_deadline(tender: dict, now: datetime) -> dict:
+    """Stored tenders are only rewritten by a healthy read, so a portal that is healing or
+    failed would keep serving `open` past the deadline. The change happened at the deadline,
+    so that is its lastChangedAt (changedSince clients see it). The next healthy read stores
+    `closed` and bumps lastChangedAt once more."""
+    deadline = tender.get("submissionDeadline")
+    if tender["status"] != "open" or not deadline or _parse_time(deadline) > now:
+        return tender
+    changed = max(tender["lastChangedAt"], deadline, key=_parse_time)
+    return tender | {"status": "closed", "lastChangedAt": changed}
 
 
 def _parse_time(value: str) -> datetime:

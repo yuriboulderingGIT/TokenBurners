@@ -16,7 +16,14 @@ repairs itself without any human help.
 4. **Repair (LLM):** when checks fail, the portal goes to `healing`. The model rewrites the
    recipe (max 3 tries) while the API keeps serving the last correct tenders.
    If it can't be repaired, or a login or captcha blocks it, the portal goes to `failed`
-   with a reason in plain words.
+   with a reason in plain words. A crash during repair also ends in `failed`, never a stuck
+   `healing`. Failed portals get a plain re-read (no model cost) every `FAILED_RETRY_MINUTES`.
+5. **Deadlines are live:** an open tender whose deadline has passed is served as `closed`
+   right away, even while its portal is `healing` or `failed`. Its `lastChangedAt` is the
+   deadline, so `changedSince` clients see the change.
+
+Posting the same portal address twice (also with or without a trailing `/`) returns the same id.
+A refresh while a read or repair is running returns that run's id.
 
 ## Run
 
