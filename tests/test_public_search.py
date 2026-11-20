@@ -66,6 +66,19 @@ def test_search_replays_html_offsets_without_saving_request_body(monkeypatch):
     asyncio.run(exercise())
 
 
+def test_compressed_search_body_is_ignored_instead_of_crashing():
+    # Playwright decodes post_data as UTF-8 and raises on a gzip body, which TED's pages send.
+    class CompressedPost:
+        url = ENDPOINT
+        headers = {"content-type": "application/json"}
+
+        @property
+        def post_data(self):
+            return bytes([0x1F, 0x8B, 0x08, 0x00]).decode()
+
+    assert ObservedSearch.observe(SOURCE, CompressedPost(), None, 0) is None
+
+
 def test_unpaged_public_search_rejects_partial_records(monkeypatch):
     async def capture(url, fetch, **kwargs):
         request = SimpleNamespace(url=ENDPOINT, headers={"content-type": "application/json"}, post_data="{}")

@@ -98,6 +98,34 @@ def test_windows_selector_loop_errors_before_starting_playwright(monkeypatch):
         runner.run(exercise())
 
 
+def test_compressed_post_bodies_do_not_stop_discovery(monkeypatch):
+    # TED's pages POST gzip bodies. Reading them as text crashed the whole browser discovery,
+    # both for ignored POSTs and for ones that look like a replayable search.
+    monkeypatch.setattr(js_discover, "_JSON_WAIT_SECONDS", 3)
+    monkeypatch.setattr(js_discover, "_EXTRA_CAPTURE_SECONDS", 0.05)
+
+    async def exercise():
+        await require_chromium()
+        fetcher = FixtureFetcher({
+            f"{BASE}/tenders": """<script>
+                const body = new Uint8Array([31, 139, 8, 0, 0, 0, 0, 0, 0, 3]);
+                const headers = {"Content-Type": "application/json"};
+                Promise.allSettled([
+                    fetch('/api/events', {method: 'POST', headers, body}),
+                    fetch('/api/search', {method: 'POST', headers, body}),
+                ]).then(() => fetch('/api/tenders'));
+            </script>""",
+            f"{BASE}/api/tenders": json.dumps({"items": [{"id": "SPA-1", "title": "Library repairs"}]}),
+        })
+        try:
+            found = await js_discover._capture_json(f"{BASE}/tenders", fetcher.for_portal("fixture"))
+            assert [key for key, _ in found] == [f"{BASE}/api/tenders"]
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
+
+
 def test_discover_and_replay_public_json_feed_after_config_responses(monkeypatch):
     monkeypatch.setattr(js_discover, "_EXTRA_CAPTURE_SECONDS", 0.05)
     monkeypatch.setattr(js_discover, "_JSON_WAIT_SECONDS", 3)
