@@ -175,6 +175,16 @@ class Fetcher:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def public_search(self, portal_id: str, url: str, *, content: bytes, media_type: str,
+                            cookies: httpx.Cookies) -> httpx.Response:
+        """Send one anonymous search with only the cookies from its public page visit."""
+        request = httpx.Request("POST", url, content=content, headers={
+            "Content-Type": media_type, "User-Agent": USER_AGENT, "Accept": "application/json, text/html",
+            "X-Requested-With": "XMLHttpRequest",
+        })
+        cookies.set_cookie_header(request)
+        return await self._send(portal_id, request, follow_redirects=False)
+
 
 class PortalFetcher:
     """A Fetcher bound to one portal. This is what brain/ functions receive."""
@@ -185,6 +195,9 @@ class PortalFetcher:
 
     async def get(self, url: str, **kw) -> httpx.Response:
         return await self.fetcher.get(self.portal_id, url, **kw)
+
+    async def public_search(self, url: str, *, content: bytes, media_type: str, cookies: httpx.Cookies) -> httpx.Response:
+        return await self.fetcher.public_search(self.portal_id, url, content=content, media_type=media_type, cookies=cookies)
 
     async def stream(self, url: str, max_bytes: int, dest_dir: Path | None = None) -> Downloaded | TooLarge:
         return await self.fetcher.stream(self.portal_id, url, max_bytes, dest_dir)

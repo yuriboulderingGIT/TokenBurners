@@ -7,6 +7,7 @@ import re
 from urllib.parse import urlsplit
 
 import httpx
+from lxml import html, etree
 from playwright.async_api import Error, Route, WebSocketRoute, async_playwright
 from pydantic import ValidationError
 
@@ -15,15 +16,17 @@ from app.fetcher import PortalCancelled, PortalFetcher
 from app.models import Health, Recipe
 from brain.blocks import Blocked, detect_block
 from brain.llm import ScopedLLM
-from brain.run_recipe import MAX_PAGES, RecipeReadError, fetch_page, portal_origin
+from brain.public_search import ObservedSearch, PublicVisit, fragment_path, at_path
+from brain.shrink import shrink
+from brain.run_recipe import _advertised_total_count, MAX_PAGES, RecipeReadError, fetch_page, portal_origin
 
 log = logging.getLogger(__name__)
-_MAX_REQUESTS = 64
+_MAX_REQUESTS = 140
 _MAX_ENDPOINTS = 4
 _MAX_RESPONSE_BYTES = 512_000
 _MAX_SCRIPT_BYTES = 4 * 1024 * 1024
 # A chunked application may need the whole request budget at one request per second.
-_PAGE_LOAD_SECONDS = 90
+_PAGE_LOAD_SECONDS = 170
 _JSON_WAIT_SECONDS = 18
 _EXTRA_CAPTURE_SECONDS = 1.25
 _BROWSER_REQUESTS = {"document", "script", "xhr", "fetch"}
@@ -71,10 +74,17 @@ async def discover_json_api(
     if not responses:
         return None
 
+    def evidence_for(key, payload):
+        if not isinstance(key, ObservedSearch):
+            return {"path": urlsplit(key).path, "sample": json.dumps(_sample(payload), ensure_ascii=False)[:5000]}
+        fragment = fragment_path(payload)
+        return {"path": urlsplit(key.spec.endpoint).path, "search": True,
+                "html_fragment": shrink(at_path(payload, fragment), max_chars=6000) if fragment is not None else None,
+                "sample": json.dumps(_sample(payload), ensure_ascii=False)[:6500]}
+
     evidence = {
         "endpoints": [
-            {"index": index, "path": urlsplit(endpoint).path,
-             "sample": json.dumps(_sample(payload), ensure_ascii=False)[:5000]}
+            {"index": index, **evidence_for(endpoint, payload)}
             for index, (endpoint, payload) in enumerate(responses)
         ],
         "previous_recipe": previous_recipe.to_json()[:4000] if previous_recipe else None,
@@ -82,6 +92,11 @@ async def discover_json_api(
     }
     strong = previous_recipe is not None
     system = f"{_INSTRUCTIONS}\nThe page limit may be at most {MAX_PAGES}."
+    if any(isinstance(key, ObservedSearch) for key, _ in responses):
+        system += (" For a search response, identify its collection total as total_path, a list of literal "
+                   "JSON object keys from the root, if present. For html_fragment use relative XPath 1.0 for "
+                   "fields and a repeating HTML row selector. Use a notice permalink or its stable ID as fields.id. "
+                   "For nested translated titles select one language. Offset pagination is handled by the reader.")
     result = await llm.json(json.dumps(evidence, ensure_ascii=False), system=system, strong=strong)
     if not isinstance(result, dict):
         return None
@@ -92,16 +107,31 @@ async def discover_json_api(
     list_spec = candidate.get("list")
     if not isinstance(list_spec, dict):
         return None
+    key, payload = responses[index]
+    search = None
+    kind = "json_api"
+    if isinstance(key, ObservedSearch):
+        search = key.spec.model_copy()
+        search.html_path = fragment_path(payload)
+        total_path = candidate.get("total_path", result.get("total_path"))
+        if isinstance(total_path, list) and total_path and all(isinstance(k, str) for k in total_path):
+            value = at_path(payload, total_path)
+            if str(value).isdigit():
+                search.total_path = total_path
+        kind = "html" if search.html_path is not None else "json_api"
     try:
         return Recipe.model_validate({
-            "kind": "json_api",
+            "kind": kind,
             "list": {
                 "item": list_spec.get("item"),
                 "next_page": list_spec.get("next_page"),
-                "max_pages": list_spec.get("max_pages", MAX_PAGES),
-                "url": responses[index][0],
+                # Paging is reconstructed from the observed search, independently of a URL selector.
+                "max_pages": MAX_PAGES if search else list_spec.get("max_pages", MAX_PAGES),
+                "url": url if search else key,
+                "search": search,
             },
-            "fields": candidate.get("fields", {}),
+            "fields": {k: v for k, v in candidate.get("fields", {}).items() if v is not None}
+                      if isinstance(candidate.get("fields", {}), dict) else candidate["fields"],
             "documents": candidate.get("documents", {}),
             "locale": candidate.get("locale", {}),
             "learned_by": llm.strong_model_name if strong else llm.model_name,
@@ -111,11 +141,15 @@ async def discover_json_api(
         return None
 
 
-async def _capture_json(url: str, fetch: PortalFetcher) -> list[tuple[str, dict | list]]:
+async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = None) -> list[tuple]:
     origin = portal_origin(url)
     if origin is None:
         return []
 
+    visit = PublicVisit(fetch)
+    searches = {}
+    search_problem = None
+    source_total = 0
     captured: dict[str, tuple[int, dict | list]] = {}
     ready = asyncio.Event()
     requests = 0
@@ -123,8 +157,25 @@ async def _capture_json(url: str, fetch: PortalFetcher) -> list[tuple[str, dict 
     cancelled: PortalCancelled | None = None
 
     async def handle(route: Route) -> None:
-        nonlocal requests, document_block, cancelled
+        nonlocal requests, document_block, cancelled, source_total, search_problem
         request = route.request
+        if (requests < _MAX_REQUESTS and cancelled is None and request.method == "POST"
+                and request.resource_type in {"xhr", "fetch"} and (target is None or request.url == target)):
+            search = ObservedSearch.observe(url, request, visit, source_total)
+            if search is not None and request.url not in searches:
+                requests += 1
+                try:
+                    payload = await search.read(0, 0)
+                    if fragment_path(payload) is not None or _feed_rank(payload, urlsplit(request.url).path):
+                        searches[request.url] = (search, payload)
+                        ready.set()
+                except PortalCancelled as exc:
+                    cancelled = exc
+                    ready.set()
+                except (RecipeReadError, httpx.HTTPError) as exc:
+                    search_problem = exc
+            await route.abort()
+            return
         if (
             requests >= _MAX_REQUESTS
             or cancelled is not None
@@ -136,7 +187,7 @@ async def _capture_json(url: str, fetch: PortalFetcher) -> list[tuple[str, dict 
             return
         requests += 1
         try:
-            response = await asyncio.wait_for(fetch_page(fetch, request.url, origin), timeout=_PAGE_LOAD_SECONDS)
+            response = await asyncio.wait_for(fetch_page(visit, request.url, origin), timeout=_PAGE_LOAD_SECONDS)
         except PortalCancelled as exc:
             cancelled = exc
             ready.set()
@@ -153,12 +204,16 @@ async def _capture_json(url: str, fetch: PortalFetcher) -> list[tuple[str, dict 
 
         content_type = response.headers.get("content-type", "")
         if request.resource_type == "document" and "html" in content_type.lower():
+            try:
+                source_total = _advertised_total_count(html.fromstring(response.text))
+            except (ValueError, etree.ParserError):
+                pass
             kind = detect_block(response.text, response.status_code)
             if kind:
                 document_block = Blocked(kind)
                 await route.abort()
                 return
-        byte_limit = _MAX_SCRIPT_BYTES if request.resource_type == "script" else _MAX_RESPONSE_BYTES
+        byte_limit = _MAX_SCRIPT_BYTES if request.resource_type in {"script", "document"} else _MAX_RESPONSE_BYTES
         if len(response.content) > byte_limit:
             await route.abort()
             return
@@ -175,7 +230,7 @@ async def _capture_json(url: str, fetch: PortalFetcher) -> list[tuple[str, dict 
                     if len(captured) > _MAX_ENDPOINTS:
                         weakest = min(captured, key=lambda key: captured[key][0])
                         del captured[weakest]
-                    if rank >= _STRONG_FEED:
+                    if rank >= _STRONG_FEED and target is None:
                         ready.set()
 
         await route.fulfill(
@@ -199,6 +254,8 @@ async def _capture_json(url: str, fetch: PortalFetcher) -> list[tuple[str, dict 
                 page = await context.new_page()
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_SECONDS * 1000)
+                    if not ready.is_set():
+                        await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
                     try:
                         await asyncio.wait_for(ready.wait(), timeout=_JSON_WAIT_SECONDS)
                     except TimeoutError:
@@ -215,8 +272,10 @@ async def _capture_json(url: str, fetch: PortalFetcher) -> list[tuple[str, dict 
         raise cancelled
     if not captured and document_block is not None:
         raise document_block
+    if search_problem is not None and not searches and not any(score >= _STRONG_FEED for score, _ in captured.values()):
+        raise RecipeReadError(str(search_problem)) from search_problem
     ranked = sorted(captured.items(), key=lambda item: item[1][0], reverse=True)
-    return [(endpoint, payload) for endpoint, (_, payload) in ranked]
+    return [*searches.values(), *((endpoint, payload) for endpoint, (_, payload) in ranked)]
 
 
 def _feed_rank(value: object, context: str, depth: int = 0) -> int:

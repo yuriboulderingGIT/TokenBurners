@@ -123,7 +123,7 @@ async def repair(
         if portal_origin(discovery_url) != origin:
             return None
     stored_ids = StoredTenderIds.from_tenders(stored_tenders, recipe) if stored_tenders else None
-    if recipe.kind == "html":
+    if recipe.kind == "html" and recipe.list_.search is None:
         try:
             listing = await read_page_sample(recipe.list_.url, fetch, origin, stored_ids=stored_ids)
             detail, detail_stored_id = await _repair_detail(recipe, listing, fetch, origin, stored_ids)
@@ -133,7 +133,7 @@ async def repair(
     feedback = list(health.problems)
     for _ in range(MAX_TRIES):
         try:
-            if recipe.kind == "html":
+            if recipe.kind == "html" and recipe.list_.search is None:
                 candidate = await propose_html_recipe(
                     listing, detail, fetch, llm, strong=True, feedback=feedback, previous=recipe,
                     pagination_page=pagination_page, expected_document_ids=health.missing_document_ids,

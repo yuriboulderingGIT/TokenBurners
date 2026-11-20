@@ -1,5 +1,6 @@
 """Read tenders and document links from a saved recipe without model calls."""
 
+import hashlib
 import logging
 import re
 from collections.abc import Callable, Iterator
@@ -99,41 +100,70 @@ async def run_recipe(
 
     tenders: list[RawTender] = []
     seen_pages: set[str] = set()
+    seen_rows: set[bytes] = set()
     observed_count = advertised_count = 0
     sampled = skipped = 0
+    search_pages = None
+    if recipe.list_.search:
+        from brain.public_search import SearchPages
+        search_pages = await SearchPages.open(page_url, recipe.list_.search, fetch)
     for page_number in range(1, recipe.list_.max_pages + 1):
-        if page_url in seen_pages:
-            raise PaginationError("pagination revisited a list page")
-        response = await fetch_page(fetch, page_url, origin)
-        current_url = str(response.url)
-        if current_url in seen_pages:
-            raise PaginationError("pagination redirected to a previous list page")
-        seen_pages.update((page_url, current_url))
-        page = _parse_page(response, recipe.kind)
+        if search_pages:
+            page = await search_pages.read(page_number, observed_count)
+            advertised_count = search_pages.total
+            current_url = page_url
+            sample_page = None
+        else:
+            if page_url in seen_pages:
+                raise PaginationError("pagination revisited a list page")
+            response = await fetch_page(fetch, page_url, origin)
+            current_url = str(response.url)
+            if current_url in seen_pages:
+                raise PaginationError("pagination redirected to a previous list page")
+            seen_pages.update((page_url, current_url))
+            page = _parse_page(response, recipe.kind)
+            sample_page = response if recipe.kind == "html" else None
         entries = [entry for entry in _flatten(item(page)) if entry is not None]
-        if recipe.kind == "html":
-            _check_block(response, content_available=bool(entries))
+        if sample_page is not None:
+            _check_block(sample_page, content_available=bool(entries))
+            # Different URLs may render the very same notice cards with a new pager.
+            if entries and all(isinstance(entry, html.HtmlElement) for entry in entries):
+                rows_hash = hashlib.sha256()
+                for entry in entries:
+                    rows_hash.update(html.tostring(entry, with_tail=False))
+                digest = rows_hash.digest()
+                if digest in seen_rows:
+                    raise PaginationError("the next listing page repeated the same notice rows", sample_page)
+                seen_rows.add(digest)
 
-        sample_page = response if recipe.kind == "html" else None
         if not entries and page_number > 1:
+            if search_pages and observed_count >= advertised_count:
+                break
             raise PaginationError(f"list.item found no tenders on page {page_number}", sample_page)
         observed_count += len(entries)
         advertised_count = max(advertised_count, _advertised_total_count(page))
-        try:
-            advertised = advertised_next_urls(page, current_url)
-            following = _navigation_url(
-                current_url, next_page(page), origin, "list.next_page", source=page,
-                advertised=advertised,
-            )
-        except RecipeReadError as exc:
-            raise PaginationError(str(exc), sample_page) from exc
-        if advertised and following not in advertised:
-            raise MissedNextPage(
-                f"list.next_page missed the advertised next page on page {page_number}", sample_page
-            )
+        if search_pages:
+            following = page_url if search_pages.more(entries, observed_count) else None
+        else:
+            try:
+                advertised = advertised_next_urls(page, current_url)
+                selected = next_page(page)
+                if recipe.kind == "html" and not advertised and selected and _last_numbered_page(page, current_url):
+                    if all(link.lower().replace(" ", "") in {"javascript:void(0);", "javascript:void(0)", "#"}
+                           for link in _strings(selected, links=True)):
+                        selected = []
+                following = _navigation_url(
+                    current_url, selected, origin, "list.next_page", source=page, advertised=advertised,
+                )
+            except RecipeReadError as exc:
+                raise PaginationError(str(exc), sample_page) from exc
+            if advertised and following not in advertised:
+                raise MissedNextPage(
+                    f"list.next_page missed the advertised next page on page {page_number}", sample_page
+                )
         if following is None and observed_count < advertised_count:
             raise PaginationError(
-                f"the JSON list advertised {advertised_count} tenders, but pagination exposed "
+                f"the {'JSON' if recipe.kind == 'json_api' else 'HTML'} list advertised {advertised_count} tenders, but pagination exposed "
                 f"only {observed_count} entries"
             )
         if not entries:
@@ -173,6 +203,20 @@ async def run_recipe(
                 _check_block(
                     detail_response, content_available=bool(values.get("id") or document_urls)
                 )
+            if search_pages and isinstance(source, html.HtmlElement) and document_urls:
+                # Search cards also link to buyer profiles, other searches and notice pages.
+                # Keep attachment links supported by HTML metadata or an actual file name.
+                attachments = set()
+                for anchor in source.xpath("descendant-or-self::a[@href]"):
+                    url = _resolve_http_url(tender_url, anchor.get("href"))
+                    if url not in document_urls:
+                        continue
+                    if ("download" in anchor.attrib or "enclosure" in anchor.get("rel", "").split()
+                            or anchor.get("type", "").startswith("application/")
+                            or re.search(r"\.(?:pdf|zip|docx?|xlsx?|odt|ods|csv|rar|7z)$",
+                                         urlsplit(url).path, re.I)):
+                        attachments.add(url)
+                document_urls = [url for url in document_urls if url in attachments]
             if isinstance(values.get("url"), str):
                 # Public feeds may link to a separate notice website. This value is
                 # delivered as metadata only, after all fetch destinations are chosen.
@@ -182,6 +226,17 @@ async def run_recipe(
                     tender_url = resolve_portal_url(tender_url, values["url"], origin) or tender_url
             if recipe.detail.link is None and tender_url == current_url and isinstance(entry, html.HtmlElement):
                 tender_url = _title_link(entry, values.get("title"), current_url, origin, document_urls) or current_url
+                if search_pages and tender_url == current_url and isinstance(values.get("id"), str):
+                    matches = set()
+                    for href in entry.xpath(".//a[not(@download)]/@href"):
+                        url = resolve_portal_url(current_url, href, origin)
+                        if url and url not in document_urls:
+                            parts = urlsplit(url)
+                            if (parts.path.rstrip("/").rsplit("/", 1)[-1] == values["id"]
+                                    or [values["id"]] in parse_qs(parts.query).values()):
+                                matches.add(url)
+                    if len(matches) == 1:
+                        tender_url = matches.pop()
             tenders.append(RawTender(url=tender_url, fields=values, document_links=document_urls))
         if following is None or (not verify_all_pages and max_tenders == sampled):
             break
@@ -333,12 +388,7 @@ def advertised_next_urls(page: Any, base_url: str) -> set[str]:
     """Independent evidence that treating this listing as the final page would lose rows."""
     links = []
     if isinstance(page, html.HtmlElement):
-        for node in page.xpath(
-            "descendant-or-self::a[@href] | descendant-or-self::button | "
-            "descendant-or-self::link[@href and @rel]"
-        ):
-            if _is_next_page_link(node, base_url):
-                links.append(node.get("href", ""))
+        links.extend(node.get("href", "") for node in next_page_controls(page, base_url))
     elif isinstance(page, dict):
         # A JSON 'next' can also be an opaque cursor. Only explicit URL references count.
         for container in (page, page.get("links"), page.get("_links"), page.get("pagination")):
@@ -351,9 +401,32 @@ def advertised_next_urls(page: Any, base_url: str) -> set[str]:
     else:
         return set()
     urls = {url for link in links if (url := _resolve_http_url(base_url, link))}
-    if isinstance(page, html.HtmlElement) and links and not urls:
+    if isinstance(page, html.HtmlElement) and links and not urls and not _last_numbered_page(page, base_url):
         raise NoPublicNextLink("the next page control provides no public HTTP link")
     return urls
+
+
+def next_page_controls(page: html.HtmlElement, base_url: str) -> list[html.HtmlElement]:
+    return [node for node in page.xpath(
+        "descendant-or-self::a[@href] | descendant-or-self::button | "
+        "descendant-or-self::link[@href and @rel]"
+    ) if _is_next_page_link(node, base_url)]
+
+
+def _last_numbered_page(page: html.HtmlElement, base_url: str) -> bool:
+    # Some pagers leave a placeholder Next link on the last page. Confirm an
+    # adjacent current/total counter and a working sibling link to earlier pages.
+    for node in next_page_controls(page, base_url):
+        container = node.getparent()
+        if container is None or not any(
+            _resolve_http_url(base_url, href) for href in container.xpath("./a/@href")
+        ):
+            continue
+        for label in container.xpath("./text() | ./*[not(self::a) and not(self::button)]/text()"):
+            match = re.search(r"(?<![\d.,])(\d+)\s*(?:/|[a-zA-ZÀ-ž]{1,6})\s*(\d+)(?![\d.,])", label)
+            if match and int(match[1]) == int(match[2]) > 0:
+                return True
+    return False
 
 
 def _is_next_page_link(node: html.HtmlElement, base_url: str) -> bool:
@@ -407,6 +480,16 @@ def _has_paging_url(base_url: str, href: str) -> bool:
 
 def _advertised_total_count(page: Any) -> int:
     """Read explicit collection totals on the JSON envelope, outside the result records."""
+    if isinstance(page, html.HtmlElement):
+        # Infinite-scroll lists sometimes compare an offset to a declared result
+        # count instead of publishing a next URL. Do not publish the initial slice.
+        for script in page.xpath("//script[not(@src)]/text()"):
+            for field, total in re.findall(
+                r"\b(?:var|const|let)\s+(total(?:Entries|Results|Count))\s*=\s*(\d{1,10})\s*;", script, re.I
+            ):
+                if re.search(r"\b(?:offset|start|loaded)\s*<\s*" + field + r"\b", script, re.I):
+                    return int(total)
+        return 0
     if not isinstance(page, dict):
         return 0
     meta = page.get("meta")

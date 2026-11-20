@@ -152,6 +152,8 @@ class Worker:
         cost = 0.0
         try:
             if recipe is None:
+                if retry:
+                    states.set_state(self.db, portal_id, states.INTEGRATING, "retrying attach: locating the tender listing", run_id)
                 self.db.run_note(run_id, "attach: no recipe yet, asking the model to learn one")
                 llm = self.llm.scoped(portal_id, run_id, "attach")
                 recipe = await learn_recipe(portal["url"], fetch, llm)

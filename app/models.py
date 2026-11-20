@@ -98,11 +98,22 @@ class Tender(BaseModel):
 # ---------- Recipe (section 4.1) ----------
 
 
+class SearchTransport(BaseModel):
+    """An anonymous search observed while loading the list URL. Bodies are transient."""
+
+    endpoint: str
+    media_type: Literal["application/json", "application/x-www-form-urlencoded"]
+    page_field: str | None = None
+    html_path: list[str] | None = None
+    total_path: list[str] | None = None
+
+
 class ListSpec(BaseModel):
     url: str
     item: str  # XPath (html) or JSON path (json_api) selecting one list entry
     next_page: str | None = None
     max_pages: int = 20
+    search: SearchTransport | None = None
 
 
 class DetailSpec(BaseModel):
