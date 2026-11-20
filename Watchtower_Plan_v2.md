@@ -77,6 +77,9 @@ Unchanged from plan v1: the API contract and tender fields, the recipe format, t
 | 9 | `.env.example` sets `DATA_DIR=./data`, so `docker run --env-file .env` writes outside the `/data` volume. | `.env.example` | P15 |
 | 10 | A portal with more than 100 list pages can't attach. | `brain/run_recipe.py` | accepted for now |
 | 11 | The brief says the LLM should also *check* a portal. We only use it to learn and to repair. | `brain/` | B20 (optional) |
+| 12 | Fresh real-model attach can fail with HTTP 400. Responses JSON mode requires the word “JSON” in `input` even when `instructions` requests JSON. The first discovery prompt can lack it. | `brain/llm.py` `call_json` | B10: prefix every model input with `Answer in JSON.\n`. Regression test: `tests/test_llm_json_input.py`. |
+
+The team reproduced issue 12 directly with `gpt-5-mini`. The API returned “Response input messages must contain the word 'json' in some form to use 'text.format' of type 'json_object'.” Adding the prefix to the same input succeeded. The automated regression covers a fresh attach to a page whose text never mentions JSON.
 
 ## 4. Who does what next
 
@@ -139,6 +142,7 @@ Same two teams as plan v1. New task numbers continue plan v1's (P13 and up, B10 
 
 ## 6. Model cost and credits
 
+- **Friday update:** the team is reserving its $50 of API credits for Saturday’s demo. Use fixtures for rehearsal. Record live B10, B14 and B15 results and costs only when those runs actually take place.
 - **The judges' run is billed to our key.** P13 comes first: one hand-in key in its own OpenAI project with a usage limit. Set `LLM_BUDGET_USD` to that limit minus a margin. It is the total for the whole data folder, shared by all portals.
 - **Models:** `gpt-5-mini` for attach, `gpt-5` for repair (or after the cheap model failed twice). Another model needs a price entry in `brain/llm.py`.
 - **Calls:** a regular read makes no model call. An attach makes up to 4 cheap calls and 1 strong call. A repair makes up to 3 strong calls.

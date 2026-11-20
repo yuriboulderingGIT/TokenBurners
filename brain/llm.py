@@ -82,8 +82,9 @@ class LLM:
             raise LLMUnavailable(f"no budget pricing configured for model {model}")
         price_in, price_out = prices
         instructions = system + " Always answer with valid JSON only."
+        model_input = "Answer in JSON.\n" + prompt
         # These text-only models tokenize bytes. Include headroom for the fixed Responses envelope.
-        max_input = min(CONTEXT_WINDOW, len(instructions.encode()) + len(prompt.encode()) + 1_024)
+        max_input = min(CONTEXT_WINDOW, len(instructions.encode()) + len(model_input.encode()) + 1_024)
         max_cost = (max_input * price_in + MAX_OUTPUT_TOKENS * price_out) / 1e6
         reservation = self.db.llm_try_reserve(portal_id, run_id, max_cost, self.budget_usd)
         if reservation is None:
@@ -93,7 +94,7 @@ class LLM:
             response = await self._get_client().responses.create(
                 model=model,
                 instructions=instructions,
-                input=prompt,
+                input=model_input,
                 text={"format": {"type": "json_object"}},
                 max_output_tokens=MAX_OUTPUT_TOKENS,
                 service_tier="default",
