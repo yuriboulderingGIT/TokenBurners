@@ -14,6 +14,8 @@ LLM_CACHE_DIR = DATA_DIR / "llm_cache"
 
 # Worker
 REFRESH_MINUTES = float(os.getenv("REFRESH_MINUTES", "15"))
+# Failed portals are retried with a plain read (no repair, so no model cost) this often.
+FAILED_RETRY_MINUTES = float(os.getenv("FAILED_RETRY_MINUTES", "180"))
 WORKER_CONCURRENCY = int(os.getenv("WORKER_CONCURRENCY", "4"))
 
 # Fetcher: politeness rule from the brief is at most 1 request per second per portal.
