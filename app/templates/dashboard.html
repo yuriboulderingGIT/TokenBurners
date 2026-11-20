@@ -2,62 +2,49 @@
 
 {% block content %}
 {% set total = portals|length %}
-{% set trouble = portals|selectattr("state", "in", ["failed", "healing", "integrating"])|list %}
 {% set tenders = portals|sum(attribute="tender_count") %}
-  <div class="title">
-    <h1>Portal monitor</h1>
-    <span class="status">
+  <div class="page-head">
+    <h1 class="headline">
       {% if total == 0 %}No portals yet
       {% elif counts.serving == total %}All {{ total }} portal{{ "s" if total != 1 }} deliver tenders
       {% else %}{{ counts.serving }} of {{ total }} portals deliver tenders{% endif %}
-    </span>
+    </h1>
   </div>
 
-  <section class="kpis" aria-label="Summary">
-    <div class="kpi serving"><div class="label"><i class="dot"></i>Serving</div><div class="value">{{ counts.serving }}</div><div class="sub">delivering correctly</div></div>
-    <div class="kpi healing {{ 'alert' if counts.healing }}"><div class="label"><i class="dot"></i>Healing</div><div class="value">{{ counts.healing + counts.integrating }}</div><div class="sub">{{ counts.integrating }} being learned, {{ counts.healing }} repairing</div></div>
-    <div class="kpi failed {{ 'alert' if counts.failed }}"><div class="label"><i class="dot"></i>Failed</div><div class="value">{{ counts.failed }}</div><div class="sub">need a person</div></div>
-    <div class="kpi"><div class="label">Tenders delivered</div><div class="value">{{ tenders }}</div><div class="sub">across {{ total }} portal{{ "s" if total != 1 }}</div></div>
-    <div class="kpi"><div class="label">Model spend</div><div class="value">${{ "%.3f"|format(total_cost) }}</div><div class="sub">attach and repair only</div></div>
-    <div class="kpi"><div class="label">Cost per portal</div><div class="value">${{ "%.3f"|format(total_cost / total if total else 0) }}</div><div class="sub">regular reads cost $0</div></div>
+  <section class="summary" aria-label="Summary">
+    <div class="cell serving"><span class="k"><i class="dot"></i>Serving</span><b>{{ counts.serving }}</b><span class="s">delivering correctly</span></div>
+    <div class="cell integrating {{ 'zero' if not counts.integrating }}"><span class="k"><i class="dot"></i>Integrating</span><b>{{ counts.integrating }}</b><span class="s">learning a new portal</span></div>
+    <div class="cell healing {{ 'on' if counts.healing else 'zero' }}"><span class="k"><i class="dot"></i>Healing</span><b>{{ counts.healing }}</b><span class="s">repairing itself</span></div>
+    <div class="cell failed {{ 'on' if counts.failed else 'zero' }}"><span class="k"><i class="dot"></i>Failed</span><b>{{ counts.failed }}</b><span class="s">needs a person</span></div>
+    <div class="cell"><span class="k">Tenders delivered</span><b>{{ tenders }}</b><span class="s">across {{ total }} portal{{ "s" if total != 1 }}</span></div>
+    <div class="cell"><span class="k">Model spend</span><b>${{ "%.3f"|format(total_cost) }}</b><span class="s">${{ "%.3f"|format(total_cost / total if total else 0) }} per portal, reads $0</span></div>
   </section>
-
-  {% if trouble %}
-  <section class="attention" aria-label="Needs attention">
-    <ul>
-      {% for p in trouble %}
-      <li class="{{ p.state }}"><i class="dot"></i><span><strong>{{ p.url.split("/", 3)[2] if "//" in p.url else p.url }}</strong>
-        {% if p.state == "failed" %}needs a person:{% elif p.state == "healing" %}is repairing itself:{% else %}is being learned:{% endif %}
-        {{ p.reason or "no reason recorded" }}</span></li>
-      {% endfor %}
-    </ul>
-  </section>
-  {% endif %}
 
   <div class="grid">
     <section class="panel" aria-label="Portals">
-      <div class="panel-head"><h2>Portals</h2><span class="faint">{{ total }} total</span></div>
-      <table>
+      <div class="panel-head"><h2>Portals</h2><span class="faint">problems first</span></div>
+      <div class="scroll">
+      <table class="portals">
         <thead><tr>
           <th>State</th><th>Portal</th><th class="num">Tenders</th><th class="hide-sm">Last good read</th>
           <th class="hide-sm">Recipe</th><th class="num hide-sm">Model cost</th><th class="hide-sm">Last 24 runs</th>
         </tr></thead>
         <tbody>
-        {% for p in portals %}
+        {# failed, healing, integrating, serving: alphabetical order is also the order of urgency #}
+        {% for p in portals|sort(attribute="state") %}
         {% set parts = p.url.split("/", 3) %}
         <tr class="{{ p.state }}">
           <td><span class="pill"><i class="dot"></i>{{ p.state }}</span></td>
-          <td>
-            <div class="host" title="{{ p.url }}"><a href="/ui/portals/{{ p.id }}">{{ parts[2] if parts|length > 2 else p.url }}</a></div>
-            <div class="path">{{ "/" ~ parts[3] if parts|length > 3 else "" }}</div>
-            {% if p.reason and not p.reason.startswith("delivering") %}<div class="reason">{{ p.reason }}</div>{% endif %}
-            <div class="rowlinks"><a href="/ui/portals/{{ p.id }}">tenders, documents and runs →</a></div>
+          <td class="portal">
+            <a class="host" href="/ui/portals/{{ p.id }}" title="{{ p.url }}">{{ parts[2] if parts|length > 2 else p.url }}</a>
+            {% if p.state != "serving" and p.reason %}<div class="reason">{{ p.reason }}</div>
+            {% else %}<div class="path">{{ "/" ~ parts[3] if parts|length > 3 else "/" }}</div>{% endif %}
           </td>
           <td class="num">{{ p.tender_count }}</td>
-          <td class="hide-sm" title="{{ p.last_success_at or '' }}">{{ p.last_success_at|ago }}</td>
-          <td class="hide-sm">
-            {% if p.recipes %}{% set r = p.recipes[0] %}<b>v{{ r.version }}</b><br>
-              <span class="faint" style="white-space: nowrap">{{ "learned" if r.created_by == "attach" else "repaired" }} {{ r.created_at|ago }}</span>
+          <td class="hide-sm nowrap" title="{{ p.last_success_at or '' }}">{{ p.last_success_at|ago }}</td>
+          <td class="hide-sm nowrap">
+            {% if p.recipes %}{% set r = p.recipes[0] %}<b>v{{ r.version }}</b>
+              <div class="sub">{{ "learned" if r.created_by == "attach" else "repaired" }} {{ r.created_at|ago }}</div>
             {% else %}<span class="faint">none yet</span>{% endif %}
           </td>
           <td class="num hide-sm">${{ "%.3f"|format(p.cost_usd) }}</td>
@@ -72,10 +59,11 @@
         {% endfor %}
         </tbody>
       </table>
+      </div>
       {% if portals %}
       <div class="legend">
-        <span><i class="beat"></i>read ok</span><span><i class="beat failed"></i>read failed</span>
-        <span><i class="beat repair"></i>repair, new recipe</span><span><i class="beat repair failed"></i>repair gave up</span>
+        <span><i class="beat ok"></i>read ok</span><span><i class="beat failed"></i>read failed</span>
+        <span><i class="beat repair ok"></i>repair, new recipe</span><span><i class="beat repair failed"></i>repair gave up</span>
         <span><i class="beat running"></i>running</span>
       </div>
       {% endif %}
@@ -87,14 +75,16 @@
         {% for r in runs %}
         {% set lines = (r.notes or "").strip().splitlines() %}
         {% set st = "serving" if r.result == "ok" else "failed" if r.result == "failed" else "integrating" %}
-        <li class="{{ 'healing' if r.kind == 'repair' and r.result == 'ok' else st }}">
+        {% set routine = r.kind == "read" and r.result == "ok" %}
+        {% set where = r.url.split("/", 3)[2] if "//" in r.url else r.url %}
+        {% set where = where[4:] if where.startswith("www.") else where %}
+        <li class="{{ 'healing' if r.kind == 'repair' and r.result == 'ok' else st }}{{ ' routine' if routine }}">
           <i class="dot"></i>
-          <span class="what">{{ r.kind|capitalize }} {{ r.result or "running" }}</span>
+          <span class="what">{{ r.kind|capitalize }} {{ r.result or "running" }}
+            {% if r.deleted_at %}<span class="where">{{ where }} (removed)</span>
+            {% else %}<a class="where" href="/ui/portals/{{ r.portal_id }}">{{ where }}</a>{% endif %}</span>
           <span class="when" title="{{ r.started_at }}">{{ r.started_at|ago }}</span>
-          {% set where = r.url.split("/", 3)[2] if "//" in r.url else r.url %}
-          {% if r.deleted_at %}<span class="where">{{ where }} (removed)</span>
-          {% else %}<a class="where" href="/ui/portals/{{ r.portal_id }}">{{ where }}</a>{% endif %}
-          {% if lines %}<details><summary>{{ lines[-1].split("] ", 1)[-1] }}</summary><pre>{{ r.notes }}</pre></details>{% endif %}
+          {% if lines and not routine %}<details><summary>{{ lines[-1].split("] ", 1)[-1] }}</summary><pre>{{ r.notes }}</pre></details>{% endif %}
         </li>
         {% else %}
         <li class="empty">Every read and repair shows up here with its reasons.</li>
