@@ -1,19 +1,49 @@
-"""Repair loop. OWNER: B1.
+"""Replace a failing recipe only after the new recipe passes a sample read."""
 
-Old recipe + new shrunk HTML + failed checks -> LLM rewrites the recipe -> test it ->
-accept, or retry (max 3 tries) -> None (the portal goes to failed).
-Use the strong model here (llm.json(..., strong=True)).
+import json
 
-STUB: always gives up.
-"""
+import httpx
 
 from app.fetcher import PortalFetcher
 from app.models import Health, Recipe
+from brain.js_discover import discover_json_api
+from brain.learn import (
+    RecipeValidationError, detail_sample, propose_html_recipe, read_page_sample, validate_candidate,
+)
 from brain.llm import ScopedLLM
+from brain.run_recipe import RecipeReadError, portal_origin
 
 MAX_TRIES = 3
 
 
 async def repair(recipe: Recipe, health: Health, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe | None:
-    # TODO(B1, B7)
+    origin = portal_origin(recipe.list_.url)
+    if origin is None:
+        return None
+    if recipe.kind == "html":
+        try:
+            listing = await read_page_sample(recipe.list_.url, fetch, origin)
+            detail = await detail_sample(listing, fetch, origin, next(iter(listing.links), None))
+        except (RecipeReadError, httpx.HTTPError):
+            return None
+
+    feedback = list(health.problems)
+    for _ in range(MAX_TRIES):
+        try:
+            if recipe.kind == "html":
+                return await propose_html_recipe(
+                    listing, detail, fetch, llm, strong=True, feedback=feedback, previous=recipe
+                )
+            candidate = await discover_json_api(
+                recipe.list_.url, fetch, llm, previous_recipe=recipe, health=Health(ok=False, problems=feedback)
+            )
+            if candidate is None:
+                feedback.append("the public JSON list could not be rediscovered")
+                continue
+            if portal_origin(candidate.list_.url) != origin:
+                raise RecipeValidationError("discovered JSON URL belongs to another portal")
+            await validate_candidate(candidate, fetch)
+            return candidate
+        except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:
+            feedback.append(str(exc))
     return None

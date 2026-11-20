@@ -1,0 +1,162 @@
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+
+from app.fetcher import FakeFetcher
+from app.models import Locale, RawTender, Recipe
+from brain.blocks import Blocked
+from brain.normalize import normalize
+from brain.run_recipe import RecipeReadError, run_recipe
+from mock_portal.server import CAPTCHA_PAGE, TENDERS, render_detail, render_list
+
+_MOCK_ORIGIN = "http://localhost:8090"
+_MOCK_RECIPE = Path(__file__).parents[1] / "testset/fixtures/mock/recipe_v1.json"
+
+
+async def _read(
+    recipe: Recipe, pages: dict[str, str | bytes], *, max_tenders: int | None = None
+) -> list[RawTender]:
+    fetcher = FakeFetcher(pages)
+    try:
+        return await run_recipe(recipe, fetcher.for_portal("test"), max_tenders=max_tenders)
+    finally:
+        await fetcher.aclose()
+
+
+def _mock_pages(ids: list[str], *, second_page: bool = False) -> dict[str, str]:
+    pages = {f"{_MOCK_ORIGIN}/tenders": render_list(1)}
+    if second_page:
+        pages[f"{_MOCK_ORIGIN}/tenders?page=2"] = render_list(2)
+    for tender_id in ids:
+        body = render_detail(tender_id)
+        assert body is not None
+        pages[f"{_MOCK_ORIGIN}/tender/{tender_id}"] = body
+    return pages
+
+
+def test_html_recipe_reads_both_mock_pages() -> None:
+    recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
+    ids = [tender["id"] for tender in TENDERS]
+    output = asyncio.run(_read(recipe, _mock_pages(ids, second_page=True)))
+    assert [tender.fields["id"] for tender in output] == ids
+    assert output[0].document_links == [
+        f"{_MOCK_ORIGIN}/download/MOCK-001/tender-documents.pdf"
+    ]
+    clean = normalize(output[0], recipe.locale)
+    assert clean is not None
+    assert clean.publicationDate == "2026-11-20"
+    assert clean.submissionDeadline == "2026-12-09T10:00:00+00:00"
+    assert clean.cpvCodes == ["45233140"]
+
+
+def test_validation_sample_stops_before_the_next_request() -> None:
+    recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
+    output = asyncio.run(_read(recipe, _mock_pages(["MOCK-001"]), max_tenders=1))
+    assert [tender.fields["id"] for tender in output] == ["MOCK-001"]
+
+
+def test_json_recipe_handles_array_paths_and_relative_urls() -> None:
+    recipe = Recipe.model_validate({
+        "kind": "json_api",
+        "list": {"url": f"{_MOCK_ORIGIN}/api/list", "item": "$.items", "next_page": "$.next"},
+        "fields": {"id": "$.id", "title": "$.title", "url": "$.publicUrl"},
+        "documents": {"link": "$.documents[*].href"},
+    })
+    pages = {
+        f"{_MOCK_ORIGIN}/api/list": json.dumps({
+            "items": [{
+                "id": 1,
+                "title": "Road repairs",
+                "publicUrl": "/tenders/1",
+                "documents": [{"href": "../docs/1"}, {"href": "https://external.example/doc"}],
+            }],
+            "next": "?page=2",
+        }),
+        f"{_MOCK_ORIGIN}/api/list?page=2": json.dumps({
+            "items": [{"id": 2, "title": "Public parks", "publicUrl": "https://notices.example/tenders/2"}],
+            "next": None,
+        }),
+    }
+    output = asyncio.run(_read(recipe, pages))
+    assert [(item.fields["id"], item.url) for item in output] == [
+        ("1", f"{_MOCK_ORIGIN}/tenders/1"),
+        ("2", "https://notices.example/tenders/2"),
+    ]
+    assert output[0].document_links == [f"{_MOCK_ORIGIN}/docs/1"]
+
+
+@pytest.mark.parametrize(("url", "error"), [
+    ("https://external.example/tenders", "off-origin URL"),
+    ("/tenders", "pagination revisited"),
+])
+def test_invalid_pagination_is_not_treated_as_a_complete_read(url: str, error: str) -> None:
+    recipe = Recipe.model_validate({
+        "list": {"url": f"{_MOCK_ORIGIN}/tenders", "item": "//li", "next_page": "//a/@href"},
+        "fields": {"id": "./text()"},
+    })
+    pages = {f"{_MOCK_ORIGIN}/tenders": f'<ul><li>ID-1</li></ul><a href="{url}">Next</a>'}
+    with pytest.raises(RecipeReadError, match=error):
+        asyncio.run(_read(recipe, pages))
+
+
+def test_pagination_does_not_follow_urls_invented_by_a_selector() -> None:
+    recipe = Recipe.model_validate({
+        "list": {"url": f"{_MOCK_ORIGIN}/tenders", "item": "//li", "next_page": "'/invented'"},
+    })
+    pages = {f"{_MOCK_ORIGIN}/tenders": '<ul><li>ID-1</li></ul><a href="/next">Next</a>'}
+    with pytest.raises(RecipeReadError, match="absent from the page's links"):
+        asyncio.run(_read(recipe, pages))
+
+
+def test_captcha_page_is_reported_as_blocked() -> None:
+    recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
+    with pytest.raises(Blocked, match="captcha"):
+        asyncio.run(_read(recipe, {f"{_MOCK_ORIGIN}/tenders": CAPTCHA_PAGE}))
+
+
+@pytest.mark.parametrize(("value", "locale", "expected"), [
+    ("09.12.2026, 10:00 Uhr", Locale(lang="de", tz="Europe/Berlin"), "2026-12-09T10:00:00+01:00"),
+    ("9 décembre 2026, 10h30", Locale(lang="fr", tz="Europe/Paris"), "2026-12-09T10:30:00+01:00"),
+    ("9 de diciembre de 2026, 10:00", Locale(lang="es", tz="Europe/Madrid"), "2026-12-09T10:00:00+01:00"),
+    ("12/09/2026, 10:00 AM", Locale(lang="en-US", tz="America/New_York"), "2026-12-09T10:00:00-05:00"),
+    ("09/12/2026, 10:00 AM", Locale(lang="en-IE", tz="Europe/Dublin"), "2026-12-09T10:00:00+00:00"),
+    ("2026-06-09T10:00:00", Locale(tz="Europe/Berlin"), "2026-06-09T10:00:00+02:00"),
+    ("2026-12-09T10:00:00-03:00", Locale(), "2026-12-09T10:00:00-03:00"),
+    ("2026-12-09T10:00:00Z", Locale(), "2026-12-09T10:00:00+00:00"),
+    ("2026-12-09T10:00:00", Locale(), None),
+    ("2026-12-09", Locale(tz="UTC"), None),
+    ("09/12/2026, 10:00", Locale(tz="UTC"), None),
+    ("2026-03-29T02:30:00", Locale(tz="Europe/Amsterdam"), None),
+    ("2026-10-25T02:30:00", Locale(tz="Europe/Amsterdam"), None),
+])
+def test_deadlines_respect_locale_and_leave_ambiguous_times_unset(
+    value: str, locale: Locale, expected: str | None
+) -> None:
+    raw = RawTender(url=_MOCK_ORIGIN, fields={"id": "X", "submissionDeadline": value})
+    tender = normalize(raw, locale)
+    assert tender is not None
+    assert tender.submissionDeadline == expected
+
+
+def test_normalizer_maps_optional_fields_and_keeps_withdrawal_status() -> None:
+    raw = RawTender(url=_MOCK_ORIGIN, fields={
+        "id": "X",
+        "publicationDate": "20 novembre 2026",
+        "submissionDeadline": "2020-01-01T10:00:00Z",
+        "status": "Annulé",
+        "procedureType": "Appel d’offres ouvert",
+        "contractNature": "Travaux",
+        "cpvCodes": ["45233140-2", "45233140", "90919200-4"],
+        "placeOfPerformance.city": "Paris",
+        "placeOfPerformance.countryCode": "fr",
+    })
+    tender = normalize(raw, Locale(lang="fr"))
+    assert tender is not None
+    assert tender.publicationDate == "2026-11-20"
+    assert tender.status == "withdrawn"
+    assert tender.procedureType == "open"
+    assert tender.contractNature == "works"
+    assert tender.cpvCodes == ["45233140", "90919200"]
+    assert tender.api_dict()["placeOfPerformance"] == {"city": "Paris", "countryCode": "FR"}

@@ -1,0 +1,41 @@
+{
+  "total_count": 1728870,
+  "results": [
+    {
+      "idweb": "26-112058",
+      "objet": "Concession des services publics de l'eau potable, de l'assainissement collectif et de l'assainissement non collectif",
+      "nomacheteur": "Agglomération Montargoise et Rives du Loing",
+      "dateparution": "2026-11-20",
+      "datelimitereponse": null,
+      "nature_libelle": "Avis de marché",
+      "type_marche": [
+        "SERVICES"
+      ],
+      "url_avis": "https://www.boamp.fr/pages/avis/?q=idweb:26-112058"
+    },
+    {
+      "idweb": "26-112119",
+      "objet": "CONTRAT DE CONCESSION DE SERVICE PUBLIC FOURRIERE MUNICIPALE AUTOMOBILE ET DEUX-ROUES",
+      "nomacheteur": "Ville de Chambéry",
+      "dateparution": "2026-11-20",
+      "datelimitereponse": null,
+      "nature_libelle": "Avis de marché",
+      "type_marche": [
+        "SERVICES"
+      ],
+      "url_avis": "https://www.boamp.fr/pages/avis/?q=idweb:26-112119"
+    },
+    {
+      "idweb": "26-111947",
+      "objet": "fourniture de matériels courant faible de contrôle d'accès",
+      "nomacheteur": "CHU GRENOBLE ALPES",
+      "dateparution": "2026-11-20",
+      "datelimitereponse": "2026-12-21T11:00:00+00:00",
+      "nature_libelle": "Avis de marché",
+      "type_marche": [
+        "FOURNITURES"
+      ],
+      "url_avis": "https://www.boamp.fr/pages/avis/?q=idweb:26-111947"
+    }
+  ]
+}

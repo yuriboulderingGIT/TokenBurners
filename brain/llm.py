@@ -22,6 +22,7 @@ PRICES: dict[str, tuple[float, float]] = {
     "gpt-5": (1.25, 10.00),
 }
 DEFAULT_PRICE = (2.0, 10.0)  # unknown model: assume expensive, so the budget errs on the safe side
+MAX_OUTPUT_TOKENS = 4_096
 
 
 class BudgetExceeded(Exception):
@@ -58,7 +59,7 @@ class LLM:
             try:
                 self._client = AsyncOpenAI()  # reads OPENAI_API_KEY
             except Exception as e:
-                raise LLMUnavailable(f"OpenAI client could not start: {e}") from e
+                raise LLMUnavailable("OpenAI client could not start. Check OPENAI_API_KEY.") from e
         return self._client
 
     async def call_json(
@@ -79,11 +80,16 @@ class LLM:
                 instructions=system + " Always answer with valid JSON only.",
                 input=prompt,
                 text={"format": {"type": "json_object"}},
+                max_output_tokens=MAX_OUTPUT_TOKENS,
             )
         except LLMUnavailable:
             raise
-        except Exception as e:  # TODO(B1): tell quota errors apart from temporary ones and retry those
-            raise LLMUnavailable(f"model call failed: {e}") from e
+        except Exception as e:
+            if getattr(e, "code", None) == "insufficient_quota":
+                raise LLMUnavailable("OpenAI quota exhausted") from e
+            status = getattr(e, "status_code", None)
+            reason = f"HTTP {status}" if status else type(e).__name__
+            raise LLMUnavailable(f"model call failed ({reason})") from e
 
         usage = response.usage
         tokens_in = getattr(usage, "input_tokens", 0) or 0
@@ -112,6 +118,10 @@ class ScopedLLM:
     @property
     def model_name(self) -> str:
         return self.llm.cheap_model
+
+    @property
+    def strong_model_name(self) -> str:
+        return self.llm.strong_model
 
     async def json(
         self, prompt: str, system: str = "You are a precise web scraping assistant.",
