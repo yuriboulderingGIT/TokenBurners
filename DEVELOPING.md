@@ -23,9 +23,13 @@ developing. The judges get one separate hand-in key at submission.
 | What | Command | Open |
 |---|---|---|
 | Tests (run before every PR) | `pytest` | |
-| API + dashboard | `uvicorn app.main:app --port 8080 --reload` | http://localhost:8080 |
+| API + dashboard | `uvicorn app.main:app --port 8080` | http://localhost:8080 |
 | Mock portal | `uvicorn mock_portal.server:app --port 8090` | http://localhost:8090/tenders |
 | Break the mock on purpose | | http://localhost:8090/_switch?layout=v2 (or `?variant=captcha`) |
+
+Install Chromium with `python -m playwright install chromium` to discover public feeds on
+JavaScript listings. On Windows, use a single worker and leave `--reload` off so
+Playwright can launch a subprocess.
 
 Add a portal (second terminal):
 

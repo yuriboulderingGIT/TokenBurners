@@ -6,12 +6,13 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from lxml import html
 
 from app.fetcher import FakeFetcher, Fetcher
 from app.models import Recipe
 from brain.blocks import Blocked, detect_block
 from brain.learn import AttachFailed, RecipeValidationError, learn_recipe, read_page_sample, validate_candidate
-from brain.run_recipe import MAX_PAGES, RecipeReadError, portal_origin, run_recipe
+from brain.run_recipe import MAX_PAGES, RecipeReadError, empty_search_url, portal_origin, run_recipe
 
 _LIST = "http://portal.example/tenders"
 _LIST_HTML = """
@@ -28,6 +29,114 @@ _IMAGE_GATE = """This question is for testing whether you are a human visitor.
 <b>What code is in the image?</b><input type="text" id="ans" name = "answer">"""
 _SCRIPT_SHELL = """<html><head><script type="module" src="/app.js"></script></head>
 <body><noscript>Enable JavaScript.</noscript><div id="app"></div></body></html>"""
+
+
+def test_listing_evidence_keeps_portal_issued_identifiers_and_sort_values():
+    markup = """<table><tr data-oid="NetTender-27" data-tendersid="10003030"
+                        onclick="openTender()">
+      <td data-sort-value="2026-11-30 10:00:00">30.11.2026, 10:00h</td>
+    </tr></table>"""
+
+    async def sample():
+        fetch = FakeFetcher({_LIST: markup})
+        try:
+            return await read_page_sample(_LIST, fetch.for_portal("portal"), portal_origin(_LIST))
+        finally:
+            await fetch.aclose()
+
+    evidence = asyncio.run(sample()).markup
+    assert 'data-oid="NetTender-27"' in evidence
+    assert 'data-tendersid="10003030"' in evidence
+    assert 'data-sort-value="2026-11-30 10:00:00"' in evidence
+    assert "onclick" not in evidence
+
+
+def test_large_menu_does_not_hide_main_listing_from_learning():
+    menu = "".join(f'<a href="/menu/{i}">Menu item {i}</a>' for i in range(500))
+    markup = f'<html><head><link rel="next" href="?page=2"></head><body><nav>{menu}</nav>' \
+             '<main><a href="/notices/REF-1">Bridge repairs</a></main></body></html>'
+
+    async def sample():
+        fetch = FakeFetcher({_LIST: markup})
+        try:
+            return await read_page_sample(_LIST, fetch.for_portal("portal"), portal_origin(_LIST))
+        finally:
+            await fetch.aclose()
+
+    evidence = asyncio.run(sample())
+    assert next(iter(evidence.links)) == "http://portal.example/notices/REF-1"
+    assert '<a href="/notices/REF-1">Bridge repairs</a>' in evidence.markup
+    assert 'rel="next"' in evidence.markup
+
+
+def test_attach_can_learn_from_the_observed_empty_public_search():
+    search = "http://portal.example/results?query=&scope=open"
+    form = """<form role="search" method="get" action="/results">
+      <input type="search" name="query"><input type="hidden" name="scope" value="open">
+      <button type="submit">Find tenders</button>
+    </form>"""
+
+    class Locator:
+        model_name = "fixture"
+
+        async def json(self, prompt, **kwargs):
+            evidence = json.loads(prompt)
+            if "entry" in evidence:
+                assert evidence["empty_search_url"] == search
+                return {"list_url": search}
+            assert evidence["list_page"]["url"] == search
+            return {"list": {"url": search, "item": "//li"}, "fields": {"id": "@data-id", "title": "./h2"}}
+
+    async def exercise():
+        fetcher = FakeFetcher({_LIST: form, search: _LIST_HTML})
+        try:
+            recipe = await learn_recipe(_LIST, fetcher.for_portal("fixture"), Locator())
+            assert recipe.list_.url == search
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
+    listing_url = "http://portal.example/notices/"
+    scoped = form.replace('action="/results"', 'action="/notices/results"')
+    assert empty_search_url(html.fromstring(scoped + form), listing_url) == (
+        "http://portal.example/notices/results?query=&scope=open"
+    )
+    for unsafe in (form.replace('method="get"', 'method="post"'),
+                   form.replace('type="search"', 'type="search" required'),
+                   form.replace('action="/results"', 'action="https://unrelated.example/results"')):
+        assert empty_search_url(html.fromstring(unsafe), _LIST) is None
+
+
+def test_attach_keeps_repeated_page_failure_when_later_selectors_miss(monkeypatch):
+    markup = _LIST_HTML + '<a rel="next" href="?page=2">Next</a>'
+    feedback = []
+
+    class Model:
+        async def json(self, prompt, **kwargs):
+            evidence = json.loads(prompt)
+            if "entry" in evidence:
+                return {"list_url": _LIST}
+            feedback.append(evidence["feedback"])
+            return {"list": {"url": _LIST, "item": "//li" if len(feedback) == 1 else "//article",
+                             "next_page": None if len(feedback) == 1 else "//a[@rel='next']/@href"}}
+
+    async def no_feed(*_args):
+        return []
+
+    monkeypatch.setattr("brain.js_discover._capture_json", no_feed)
+
+    async def exercise():
+        fetcher = FakeFetcher({_LIST: markup, _LIST + "?page=2": _LIST_HTML})
+        try:
+            with pytest.raises(AttachFailed) as failed:
+                await learn_recipe(_LIST, fetcher.for_portal("fixture"), Model())
+            assert "the next listing page repeated the same notice rows" in str(failed.value)
+            assert "the list selector found no tenders" in str(failed.value)
+            assert len(feedback[2]) == 2
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
 
 
 def test_image_challenge_on_next_page_stops_the_read():
@@ -162,13 +271,15 @@ def test_attach_uses_final_origin_for_evidence_and_recipe():
                 assert evidence["entry"]["links"] == {listing: "Tenders"}
                 return {"list_url": "notices"}
             assert evidence["list_page"]["url"] == listing
-            return {"list": {"url": listing, "item": "//li"}, "fields": {"id": "@data-id", "title": "./h2"}}
+            return {"list": {"url": listing, "item": "//li"},
+                    "fields": {"id": "@data-id", "title": "./h2", "submissionDeadline": None}}
 
     async def exercise():
         fetcher = Fetcher(min_interval=0, retries=0, transport=httpx.MockTransport(respond))
         try:
             recipe = await learn_recipe(entry, fetcher.for_portal("fixture"), FixtureLLM())
             assert recipe.list_.url == listing
+            assert "submissionDeadline" not in recipe.fields
             assert [url for _, _, url in fetcher.request_log] == [entry, secure, landing, listing, listing]
         finally:
             await fetcher.aclose()

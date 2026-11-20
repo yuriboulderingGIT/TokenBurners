@@ -8,6 +8,7 @@ _DROP = {"script", "style", "svg", "noscript", "template"}
 _ATTRIBUTES = {
     "id", "class", "href", "title", "rel", "role", "lang", "itemprop", "datetime",
     "aria-label", "data-testid", "data-id", "data-oid", "data-tender-id", "download",
+    "data-tendersid", "data-sort-value",
 }
 _REPEATED = {"article", "div", "li", "tr"}
 
@@ -37,5 +38,12 @@ def shrink(markup: str, max_chars: int = 60_000) -> str:
                 rows[group] += 1
                 if rows[group] > 5:
                     child.drop_tree()
-    compact = html.tostring(root, encoding="unicode", method="html")
-    return " ".join(compact.split())[:max_chars]
+    compact = " ".join(html.tostring(root, encoding="unicode", method="html").split())
+    if len(compact) > max_chars:
+        primary = root.xpath("(descendant-or-self::main | descendant-or-self::*[@role='main'])[1]")
+        if primary:
+            # Keep the content and head pagination links visible ahead of long site menus.
+            head_links = root.xpath("//head/link[@href and @rel]")
+            relevant = head_links + primary
+            compact = " ".join("".join(html.tostring(node, encoding="unicode") for node in relevant).split())
+    return compact[:max_chars]

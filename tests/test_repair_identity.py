@@ -215,7 +215,7 @@ def test_repair_checks_json_record_identity_with_reordering_and_turnover(monkeyp
     ]
     attempts = []
 
-    async def rediscover(_url, _fetch, _llm, *, previous_recipe, health):
+    async def rediscover(_url, _fetch, _llm, *, previous_recipe, health, entry_response=None):
         attempts.append(list(health.problems))
         candidate = previous_recipe.model_copy(deep=True)
         if len(attempts) == 1:
