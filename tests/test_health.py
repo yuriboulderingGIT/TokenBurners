@@ -1,7 +1,7 @@
 """Health checks (P9). OWNER: A2."""
 
 from app.health import check_health
-from app.models import ReadResult, Tender
+from app.models import Document, ReadResult, Tender
 
 FUTURE = "2099-01-01T10:00:00+01:00"
 PAST = "2020-01-01T10:00:00+01:00"
@@ -94,3 +94,19 @@ def test_document_failures() -> None:
     assert not check_health(GOOD, read(ok, documents_tried=10, documents_failed=6)).ok
     assert not check_health(GOOD, read(ok, documents_tried=2, documents_failed=2)).ok
     assert check_health(GOOD, read(ok, documents_tried=1, documents_failed=1)).ok  # one hiccup is not a pattern
+
+
+def test_document_links_compared_for_continuing_tenders_with_unchanged_status() -> None:
+    doc = Document(fileName="notice.pdf", sizeBytes=10, sha256="abc", path="/files/abc")
+    before = read(
+        [tender(0, status="closed", documents=[doc])] + [tender(n, documents=[doc]) for n in range(1, 5)]
+    )
+    after = [tender(0, status="closed"), tender(1), tender(2), tender(3, status="withdrawn"), tender(5)]
+    health = check_health(before, read(after))
+    assert not health.ok
+    assert "document links disappeared for 3 of 3" in health.problems[0]
+    assert health.missing_document_ids == {"T-0", "T-1", "T-2"}
+
+    # Links can still be present when files were skipped for size. One removal is routine.
+    health = check_health(before, read(after, tender_ids_with_document_links={"T-0", "T-1"}))
+    assert health.ok and not health.missing_document_ids

@@ -64,7 +64,7 @@ def test_worker_attaches_refreshes_and_repairs(tmp_path, monkeypatch):
                 assert evidence["previous_recipe"]["list"]["item"] == v1["list"]["item"]
                 if model_calls.count(True) == 1:
                     return v1
-                assert "the list selector found no tenders" in evidence["feedback"]
+                assert any("missed the advertised next page" in problem for problem in evidence["feedback"])
                 return _recipe_v2()
             return v1
 

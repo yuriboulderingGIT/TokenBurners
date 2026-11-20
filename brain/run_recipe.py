@@ -1,8 +1,10 @@
 """Read tenders and document links from a saved recipe without model calls."""
 
+import re
 from collections.abc import Callable, Iterator
+from itertools import islice
 from typing import Any
-from urllib.parse import urldefrag, urljoin, urlsplit
+from urllib.parse import parse_qs, urldefrag, urljoin, urlsplit
 
 import httpx
 from jsonpath_ng import parse as parse_jsonpath
@@ -14,9 +16,24 @@ from app.models import RawTender, Recipe
 from brain.blocks import Blocked, detect_block
 from brain.shrink import shrink
 
-_MAX_PAGES = 100
+MAX_PAGES = 100
 _MAX_REDIRECTS = 5
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_STALE_ENDPOINT_STATUSES = {400, 404, 405, 410, 422}
+_NEXT_PAGE_LABELS = {
+    "next page", "nächste seite", "volgende pagina", "page suivante",
+    "siguiente página", "página siguiente", "pagina successiva", "następna strona",
+    "página seguinte", "próxima página",
+}
+_NEXT_LABELS = {
+    "next", "weiter", "nächste", "nächster", "volgende", "suivant", "suivante",
+    "siguiente", "successiva", "successivo", "następna", "dalej", "seguinte", "próxima",
+}
+_PAGE_QUERY_KEYS = {
+    "p", "page", "pagenumber", "pageindex", "offset", "skip", "start", "cursor", "seite", "pagina",
+}
+_PAGER_CONTEXT = re.compile(r"\b(?:pagination|paginator|paging|pager|page navigation)\b", re.I)
+_PAGE_PATH_SUFFIX = re.compile(r"/(?:page|seite|pagina)/[0-9]+/?$", re.I)
 
 Selector = Callable[[Any], list[Any]]
 Origin = tuple[str, str, int]
@@ -46,8 +63,8 @@ async def run_recipe(
         raise ValueError("max_tenders must be nonnegative")
     if max_tenders == 0:
         return []
-    if not 1 <= recipe.list_.max_pages <= _MAX_PAGES:
-        raise RecipeReadError(f"max_pages must be between 1 and {_MAX_PAGES}")
+    if not 1 <= recipe.list_.max_pages <= MAX_PAGES:
+        raise RecipeReadError(f"max_pages must be between 1 and {MAX_PAGES}")
 
     page_url = recipe.list_.url.strip()
     origin = portal_origin(page_url)
@@ -68,6 +85,7 @@ async def run_recipe(
 
     tenders: list[RawTender] = []
     seen_pages: set[str] = set()
+    observed_count = advertised_count = 0
     for page_number in range(1, recipe.list_.max_pages + 1):
         if page_url in seen_pages:
             raise PaginationError("pagination revisited a list page")
@@ -82,10 +100,10 @@ async def run_recipe(
             _check_block(response, content_available=bool(entries))
 
         sample_page = response if recipe.kind == "html" else None
-        if not entries:
-            if page_number > 1:
-                raise PaginationError(f"list.item found no tenders on page {page_number}", sample_page)
-            return []
+        if not entries and page_number > 1:
+            raise PaginationError(f"list.item found no tenders on page {page_number}", sample_page)
+        observed_count += len(entries)
+        advertised_count = max(advertised_count, _advertised_total_count(page))
         advertised = _advertised_next_urls(page, current_url)
         try:
             following = _navigation_url(
@@ -98,6 +116,13 @@ async def run_recipe(
             raise PaginationError(
                 f"list.next_page missed the advertised next page on page {page_number}", sample_page
             )
+        if following is None and observed_count < advertised_count:
+            raise PaginationError(
+                f"the JSON list advertised {advertised_count} tenders, but pagination exposed "
+                f"only {observed_count} entries"
+            )
+        if not entries:
+            return []
 
         if max_tenders is not None:
             entries = entries[:max_tenders - len(tenders)]
@@ -175,7 +200,10 @@ async def fetch_page(fetch: PortalFetcher, url: str, origin: Origin) -> httpx.Re
         if response.status_code not in _REDIRECT_STATUSES:
             if not response.is_success:
                 _check_block(response)
-                raise RecipeReadError(f"portal returned HTTP {response.status_code}")
+                message = f"portal returned HTTP {response.status_code}"
+                if response.status_code in _STALE_ENDPOINT_STATUSES:
+                    raise RecipeReadError(message)
+                raise httpx.HTTPStatusError(message, request=response.request, response=response)
             return response
         redirect = resolve_portal_url(url, response.headers.get("Location", ""), origin)
         if redirect is None:
@@ -224,15 +252,11 @@ def _advertised_next_urls(page: Any, base_url: str) -> set[str]:
     links = []
     if isinstance(page, html.HtmlElement):
         for node in page.xpath("descendant-or-self::a[@href] | descendant-or-self::link[@href and @rel]"):
-            if "disabled" in node.attrib or node.get("aria-disabled", "").lower() == "true":
-                continue
-            rel = node.get("rel", "").lower().split()
-            label = " ".join((node.get("aria-label") or node.text_content()).casefold().split())
-            if "next" in rel or label == "next page":
+            if _is_next_page_link(node, base_url):
                 links.append(node.get("href"))
     elif isinstance(page, dict):
         # A JSON 'next' can also be an opaque cursor. Only explicit URL references count.
-        for container in (page, page.get("links"), page.get("_links")):
+        for container in (page, page.get("links"), page.get("_links"), page.get("pagination")):
             if isinstance(container, dict):
                 value = container.get("next")
                 if isinstance(value, dict):
@@ -242,6 +266,76 @@ def _advertised_next_urls(page: Any, base_url: str) -> set[str]:
     else:
         return set()
     return {url for link in links if (url := _resolve_http_url(base_url, link))}
+
+
+def _is_next_page_link(node: html.HtmlElement, base_url: str) -> bool:
+    context = [node, *islice(node.iterancestors(), 4)]
+    if any(_is_disabled(control) for control in context):
+        return False
+    if "next" in node.get("rel", "").lower().split():
+        return True
+    labels = {
+        " ".join(value.casefold().split()).strip(" ›»→←‹«.")
+        for value in (node.get("aria-label", ""), node.get("title", ""), node.text_content())
+    }
+    if labels & _NEXT_PAGE_LABELS:
+        return True
+    if not labels & _NEXT_LABELS:
+        return False
+    return _has_paging_url(base_url, node.get("href")) or any(
+        _PAGER_CONTEXT.search(control.get(attribute, "").replace("_", " "))
+        for control in context
+        for attribute in ("class", "id", "aria-label")
+    )
+
+
+def _is_disabled(node: html.HtmlElement) -> bool:
+    return (
+        "disabled" in node.attrib or "hidden" in node.attrib
+        or node.get("aria-disabled", "").lower() == "true"
+        or node.get("aria-hidden", "").lower() == "true"
+        or "disabled" in node.get("class", "").casefold().split()
+    )
+
+
+def _has_paging_url(base_url: str, href: str) -> bool:
+    target = _resolve_http_url(base_url, href)
+    if target is None or portal_origin(target) != portal_origin(base_url):
+        return False
+    base, following = urlsplit(base_url), urlsplit(target)
+    if following.path != base.path:
+        return bool(
+            _PAGE_PATH_SUFFIX.search(following.path)
+            and _PAGE_PATH_SUFFIX.sub("", following.path).rstrip("/")
+            == _PAGE_PATH_SUFFIX.sub("", base.path).rstrip("/")
+        )
+    previous_query = parse_qs(base.query)
+    return any(
+        key.casefold().replace("_", "").replace("-", "") in _PAGE_QUERY_KEYS
+        and previous_query.get(key) != value
+        for key, value in parse_qs(following.query).items()
+    )
+
+
+def _advertised_total_count(page: Any) -> int:
+    """Read explicit collection totals on the JSON envelope, outside the result records."""
+    if not isinstance(page, dict):
+        return 0
+    meta = page.get("meta")
+    containers = [page, page.get("pagination"), meta]
+    if isinstance(meta, dict):
+        containers.append(meta.get("pagination"))
+    total = 0
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for key in ("total_count", "totalCount"):
+            value = container.get(key)
+            if isinstance(value, str) and len(value) <= 18 and re.fullmatch(r"[0-9]+", value):
+                value = int(value)
+            if type(value) is int:
+                total = max(total, value)
+    return total
 
 
 def _observed_href(source: Any, base_url: str, url: str, origin: Origin) -> bool:

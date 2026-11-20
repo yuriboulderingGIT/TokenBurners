@@ -10,19 +10,24 @@ Brain code receives a ScopedLLM (bound to one portal and run):
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from app.config import LLM_BUDGET_USD, LLM_CACHE, LLM_CACHE_DIR, OPENAI_MODEL, OPENAI_MODEL_STRONG
 from app.db import DB
 
-# USD per 1M tokens (input, output). TODO(B1): check these on OpenAI's pricing page.
+# Standard-tier USD per million text tokens for the configured models.
+# https://developers.openai.com/api/docs/models/gpt-5-mini
+# https://developers.openai.com/api/docs/models/gpt-5
 PRICES: dict[str, tuple[float, float]] = {
     "gpt-5-mini": (0.25, 2.00),
     "gpt-5": (1.25, 10.00),
 }
-DEFAULT_PRICE = (2.0, 10.0)  # unknown model: assume expensive, so the budget errs on the safe side
 MAX_OUTPUT_TOKENS = 4_096
+CONTEXT_WINDOW = 400_000
 
 
 class BudgetExceeded(Exception):
@@ -57,13 +62,14 @@ class LLM:
             from openai import AsyncOpenAI  # imported lazily so tests don't need a key
 
             try:
-                self._client = AsyncOpenAI()  # reads OPENAI_API_KEY
+                self._client = AsyncOpenAI(max_retries=0)  # one paid request per reservation
             except Exception as e:
                 raise LLMUnavailable("OpenAI client could not start. Check OPENAI_API_KEY.") from e
         return self._client
 
     async def call_json(
-        self, prompt: str, system: str, model: str, portal_id: str, run_id: str | None, purpose: str
+        self, prompt: str, system: str, model: str, portal_id: str, run_id: str | None, purpose: str,
+        *, on_cost: Callable[[float], None] | None = None,
     ) -> tuple[dict[str, Any], float]:
         """Returns (parsed JSON answer, cost in USD)."""
         key = hashlib.sha256(f"{model}\n{system}\n{prompt}".encode()).hexdigest()
@@ -71,32 +77,56 @@ class LLM:
         if cached and cached.exists():
             return json.loads(cached.read_text(encoding="utf-8")), 0.0
 
-        if self.db.llm_total_cost() >= self.budget_usd:
-            raise BudgetExceeded(f"model budget of ${self.budget_usd:.2f} is used up")
+        prices = PRICES.get(model.removesuffix("-2025-08-07"))
+        if prices is None:
+            raise LLMUnavailable(f"no budget pricing configured for model {model}")
+        price_in, price_out = prices
+        instructions = system + " Always answer with valid JSON only."
+        # These text-only models tokenize bytes. Include headroom for the fixed Responses envelope.
+        max_input = min(CONTEXT_WINDOW, len(instructions.encode()) + len(prompt.encode()) + 1_024)
+        max_cost = (max_input * price_in + MAX_OUTPUT_TOKENS * price_out) / 1e6
+        reservation = self.db.llm_try_reserve(portal_id, run_id, max_cost, self.budget_usd)
+        if reservation is None:
+            raise BudgetExceeded(f"insufficient unreserved budget for this call (cap ${self.budget_usd:.2f})")
 
         try:
             response = await self._get_client().responses.create(
                 model=model,
-                instructions=system + " Always answer with valid JSON only.",
+                instructions=instructions,
                 input=prompt,
                 text={"format": {"type": "json_object"}},
                 max_output_tokens=MAX_OUTPUT_TOKENS,
+                service_tier="default",
             )
         except LLMUnavailable:
+            self.db.llm_release(reservation)  # client initialization failed before dispatch
             raise
         except Exception as e:
-            if getattr(e, "code", None) == "insufficient_quota":
-                raise LLMUnavailable("OpenAI quota exhausted") from e
             status = getattr(e, "status_code", None)
+            quota_error = getattr(e, "code", None) == "insufficient_quota"
+            if quota_error or status in {400, 401, 403, 404, 413, 422, 429} or isinstance(
+                e.__cause__, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+            ):
+                self.db.llm_release(reservation)
+            else:
+                # A disconnected client cannot tell whether generation was billed.
+                raise LLMUnavailable("model usage unconfirmed after request failure. Budget reservation retained.") from e
+            if quota_error:
+                raise LLMUnavailable("OpenAI quota exhausted") from e
             reason = f"HTTP {status}" if status else type(e).__name__
             raise LLMUnavailable(f"model call failed ({reason})") from e
 
         usage = response.usage
-        tokens_in = getattr(usage, "input_tokens", 0) or 0
-        tokens_out = getattr(usage, "output_tokens", 0) or 0
-        price_in, price_out = PRICES.get(model, DEFAULT_PRICE)
-        cost = tokens_in / 1e6 * price_in + tokens_out / 1e6 * price_out
-        self.db.llm_log(portal_id, run_id, model, tokens_in, tokens_out, cost, purpose)
+        tokens_in = getattr(usage, "input_tokens", None)
+        tokens_out = getattr(usage, "output_tokens", None)
+        if tokens_in is None or tokens_out is None:
+            raise LLMUnavailable("model returned no token usage. Budget reservation retained.")
+        cached_tokens = getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0
+        input_cost = ((tokens_in - cached_tokens) + cached_tokens / 10) * price_in / 1e6
+        cost = input_cost + tokens_out * price_out / 1e6
+        self.db.llm_log(portal_id, run_id, model, tokens_in, tokens_out, cost, purpose, reservation=reservation)
+        if on_cost is not None:
+            on_cost(cost)
 
         data = json.loads(response.output_text)
         if cached:
@@ -123,13 +153,15 @@ class ScopedLLM:
     def strong_model_name(self) -> str:
         return self.llm.strong_model
 
+    def _add_cost(self, cost: float) -> None:
+        self.total_cost += cost
+
     async def json(
         self, prompt: str, system: str = "You are a precise web scraping assistant.",
         strong: bool = False, purpose: str | None = None,
     ) -> dict[str, Any]:
         model = self.llm.strong_model if strong else self.llm.cheap_model
-        data, cost = await self.llm.call_json(
-            prompt, system, model, self.portal_id, self.run_id, purpose or self.purpose
+        data, _ = await self.llm.call_json(
+            prompt, system, model, self.portal_id, self.run_id, purpose or self.purpose, on_cost=self._add_cost,
         )
-        self.total_cost += cost
         return data

@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     purpose TEXT NOT NULL,             -- attach | repair | check
     at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS llm_reservations (
+    id TEXT PRIMARY KEY,
+    portal_id TEXT,
+    run_id TEXT,
+    max_cost_usd REAL NOT NULL,
+    at TEXT NOT NULL
+);
 """
 
 
@@ -377,15 +384,37 @@ class DB:
 
     # ----- model cost -----
 
+    def llm_try_reserve(
+        self, portal_id: str, run_id: str | None, max_cost: float, budget: float,
+    ) -> str | None:
+        reservation = uuid.uuid4().hex
+        # The balance check and insert share one SQLite write, including across workers.
+        with self.transaction() as conn:
+            inserted = conn.execute(
+                "INSERT INTO llm_reservations (id, portal_id, run_id, max_cost_usd, at) "
+                "SELECT ?, ?, ?, ?, ? WHERE ? + "
+                "(SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls) + "
+                "(SELECT COALESCE(SUM(max_cost_usd), 0) FROM llm_reservations) <= ?",
+                (reservation, portal_id, run_id, max_cost, now_iso(), max_cost, budget),
+            )
+            return reservation if inserted.rowcount else None
+
+    def llm_release(self, reservation: str) -> None:
+        self.execute("DELETE FROM llm_reservations WHERE id = ?", (reservation,))
+
     def llm_log(
         self, portal_id: str | None, run_id: str | None, model: str,
         tokens_in: int, tokens_out: int, cost_usd: float, purpose: str,
+        *, reservation: str | None = None,
     ) -> None:
-        self.execute(
-            "INSERT INTO llm_calls (portal_id, run_id, model, tokens_in, tokens_out, cost_usd, purpose, at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (portal_id, run_id, model, tokens_in, tokens_out, cost_usd, purpose, now_iso()),
-        )
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO llm_calls (portal_id, run_id, model, tokens_in, tokens_out, cost_usd, purpose, at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (portal_id, run_id, model, tokens_in, tokens_out, cost_usd, purpose, now_iso()),
+            )
+            if reservation is not None:
+                conn.execute("DELETE FROM llm_reservations WHERE id = ?", (reservation,))
 
     def llm_total_cost(self) -> float:
         row = self.one("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM llm_calls")

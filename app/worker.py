@@ -10,6 +10,7 @@ Notes for other agents (Brain code called from here):
 - Raise, don't return error values. The worker turns each exception into a state + reason:
     Blocked (brain/blocks.py)            -> failed, "blocked: ..."
     AttachFailed (brain/learn.py)        -> failed, "could not attach: ..."
+    RecipeReadError (brain/run_recipe.py) -> failed read, attempt repair if allowed
     BudgetExceeded / LLMUnavailable      -> keep last good tenders, reason says so
     PortalCancelled (app/fetcher.py)     -> portal was deleted, run stops quietly
     anything else                        -> keep last good tenders, reason names the error
@@ -34,7 +35,7 @@ from brain.learn import AttachFailed, learn_recipe
 from brain.llm import LLM, BudgetExceeded, LLMUnavailable
 from brain.normalize import normalize
 from brain.repair import repair
-from brain.run_recipe import PaginationError, run_recipe
+from brain.run_recipe import PaginationError, RecipeReadError, run_recipe
 
 log = logging.getLogger("watchtower.worker")
 
@@ -140,9 +141,10 @@ class Worker:
             pagination_page = None
             try:
                 result = await self._execute(portal_id, recipe, fetch)
-            except PaginationError as exc:
+            except RecipeReadError as exc:
                 health = Health(ok=False, problems=[str(exc)])
-                pagination_page = exc.page_sample
+                if isinstance(exc, PaginationError):
+                    pagination_page = exc.page_sample
             else:
                 health = check_health(self._previous(portal_id), result)
                 self.db.run_note(run_id, f"read {result.raw_count} list entries, {len(result.tenders)} tenders")
@@ -155,7 +157,10 @@ class Worker:
             problems = "; ".join(health.problems)
             self.db.run_finish(run_id, "failed", f"health check failed: {problems}", cost)
             if allow_repair:
-                await self._repair(portal_id, recipe, health, fetch, pagination_page)
+                await self._repair(
+                    portal_id, recipe, health, fetch,
+                    portal_url=portal["url"], pagination_page=pagination_page,
+                )
             elif retry:
                 states.set_state(self.db, portal_id, states.FAILED, f"still failing on retry: {problems}")
             else:
@@ -182,6 +187,7 @@ class Worker:
     async def _execute(self, portal_id: str, recipe: Recipe, fetch: PortalFetcher) -> ReadResult:
         raws = await run_recipe(recipe, fetch)
         tenders: list[Tender] = []
+        tender_ids_with_document_links: set[str] = set()
         tried = failed = blocked = 0
         block_kind: str | None = None
         for raw in raws:
@@ -189,6 +195,7 @@ class Worker:
             if tender is None:
                 continue
             if raw.document_links:
+                tender_ids_with_document_links.add(tender.id)
                 links = list(dict.fromkeys(raw.document_links))
                 stored = await store_documents(self.db, portal_id, tender, links, fetch)
                 tender.documents = stored.documents
@@ -200,10 +207,14 @@ class Worker:
         if tried and blocked == tried:
             # Every document sits behind a login or captcha: the portal can't be delivered.
             raise Blocked(block_kind or "login", "the tender documents can't be downloaded without it")
-        return ReadResult(tenders=tenders, raw_count=len(raws), documents_tried=tried, documents_failed=failed)
+        return ReadResult(
+            tenders=tenders, raw_count=len(raws), documents_tried=tried, documents_failed=failed,
+            tender_ids_with_document_links=tender_ids_with_document_links,
+        )
 
     async def _repair(
-        self, portal_id: str, recipe: Recipe, health: Health, fetch: PortalFetcher,
+        self, portal_id: str, recipe: Recipe, health: Health, fetch: PortalFetcher, *,
+        portal_url: str,
         pagination_page: dict[str, str] | None = None,
     ) -> None:
         problems = "; ".join(health.problems)
@@ -212,7 +223,9 @@ class Worker:
         states.set_state(self.db, portal_id, states.HEALING, f"repairing after: {problems}", repair_run)
         llm = self.llm.scoped(portal_id, repair_run, "repair")
         try:
-            new_recipe = await repair(recipe, health, fetch, llm, pagination_page=pagination_page)
+            new_recipe = await repair(
+                recipe, health, fetch, llm, portal_url=portal_url, pagination_page=pagination_page
+            )
         except (BudgetExceeded, LLMUnavailable) as e:
             self.db.run_finish(repair_run, "failed", str(e), llm.total_cost)
             states.set_state(self.db, portal_id, states.FAILED, f"repair impossible, model unavailable: {e}")

@@ -15,7 +15,8 @@ Checks:
   (titles must always be found for >= 80%)
 - the tender count fell by more than half, not counting tenders that closed on time
 - the same tender page now yields a different id
-- document downloads failing
+- document links disappearing from a majority of continuing tenders that had files and kept their status,
+  or widespread document download failures
 """
 
 from collections import Counter
@@ -31,6 +32,7 @@ MIN_TENDERS_FOR_DROP = 4  # smaller portals swing too much on their own
 MIN_TENDERS_FOR_PATTERNS = 3
 MAX_CHANGED_ID_SHARE = 0.2
 MAX_DOCUMENT_FAILURE_SHARE = 0.5
+MAX_DOCUMENT_LINK_LOSS_SHARE = 0.5
 
 _FIELD_NAMES = {
     "title": "the title",
@@ -51,11 +53,24 @@ def check_health(prev: ReadResult | None, new: ReadResult) -> Health:
     previous = prev.tenders if prev else []
     problems += _identity_problems(new)
     problems += _fill_problems(tenders, previous)
+    missing_document_ids: set[str] = set()
     if previous:
         problems += _drop_problems(tenders, previous)
         problems += _changed_id_problems(tenders, previous)
+        documented = {t.id: t.status for t in previous if t.documents}
+        comparable = {t.id for t in tenders if documented.get(t.id) == t.status}
+        linked = new.tender_ids_with_document_links
+        if linked is None:
+            linked = {t.id for t in tenders if t.documents}
+        missing = comparable - linked
+        if len(missing) > MAX_DOCUMENT_LINK_LOSS_SHARE * len(comparable):
+            missing_document_ids = missing
+            problems.append(
+                f"document links disappeared for {len(missing)} of {len(comparable)} continuing "
+                "tenders that previously had documents. Check the documents.link selector"
+            )
     problems += _document_problems(new)
-    return Health(ok=not problems, problems=problems)
+    return Health(ok=not problems, problems=problems, missing_document_ids=missing_document_ids)
 
 
 def _sick(problem: str) -> Health:

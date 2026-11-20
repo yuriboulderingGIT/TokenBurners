@@ -76,6 +76,58 @@ def test_documents_are_downloaded_unpacked_and_served(portal) -> None:
     assert {i: t["lastChangedAt"] for i, t in again.items()} == changed_at
 
 
+@pytest.mark.parametrize("can_repair", [True, False])
+def test_document_selector_change_preserves_files_during_repair(portal, monkeypatch, can_repair) -> None:
+    db, portal_id = portal
+    monkeypatch.setattr(server, "TENDERS", [dict(t, deadline="31 Dec 2099, 09:00") for t in server.TENDERS])
+    render = server.render_detail
+    link_class = "download"
+
+    def detail(tender_id, layout):
+        page = render(tender_id, layout)
+        return page.replace('<a href="/download/', f'<a class="{link_class}" href="/download/') if page else page
+
+    monkeypatch.setattr(server, "render_detail", detail)
+    previous = db.recipe_latest(portal_id)
+    previous.documents.link = "//a[@class='download']/@href"
+    db.recipe_save(portal_id, previous, "attach", 0)
+    _read_once(db, portal_id)
+    last_good = db.tenders_for(portal_id)
+    assert len(last_good) == 5 and all(t["documents"] for t in last_good)
+    link_class = "attachment"
+
+    class RepairModel(_NoModel):
+        strong_model_name = "fixture"
+
+        def __init__(self):
+            self.requests = []
+
+        async def json(self, prompt, *, system, strong):
+            self.requests.append(json.loads(prompt))
+            assert db.portal_get(portal_id)["state"] == "healing"
+            assert db.tenders_for(portal_id) == last_good
+            proposal = previous.model_dump(by_alias=True)
+            if can_repair and len(self.requests) == 2:
+                proposal["documents"]["link"] = "//a[@class='attachment']/@href"
+            return proposal
+
+    model = RepairModel()
+    _read_once(db, portal_id, llm=model)
+    assert "document links disappeared for 5 of 5" in model.requests[0]["feedback"][0]
+    assert "sampled tenders still have no document links" in model.requests[1]["feedback"]
+    assert db.tenders_for(portal_id) == last_good
+    [repair_run] = [r for r in db.runs_for(portal_id) if r["kind"] == "repair"]
+    if can_repair:
+        assert len(model.requests) == 2
+        assert db.portal_get(portal_id)["state"] == "serving"
+        assert repair_run["result"] == "ok"
+    else:
+        assert len(model.requests) == 3
+        assert db.portal_get(portal_id)["state"] == "failed"
+        assert repair_run["result"] == "failed"
+        assert db.recipe_latest(portal_id).version == previous.version
+
+
 def test_documents_behind_a_login_fail_the_portal_with_a_reason(portal) -> None:
     db, portal_id = portal
     server.STATE["docs"] = "login"

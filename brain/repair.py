@@ -19,9 +19,13 @@ MAX_TRIES = 3
 async def repair(
     recipe: Recipe, health: Health, fetch: PortalFetcher, llm: ScopedLLM, *,
     pagination_page: dict[str, str] | None = None,
+    portal_url: str | None = None,
 ) -> Recipe | None:
     origin = portal_origin(recipe.list_.url)
     if origin is None:
+        return None
+    discovery_url = portal_url or recipe.list_.url
+    if recipe.kind == "json_api" and portal_origin(discovery_url) != origin:
         return None
     if recipe.kind == "html":
         try:
@@ -36,17 +40,17 @@ async def repair(
             if recipe.kind == "html":
                 return await propose_html_recipe(
                     listing, detail, fetch, llm, strong=True, feedback=feedback, previous=recipe,
-                    pagination_page=pagination_page,
+                    pagination_page=pagination_page, expected_document_ids=health.missing_document_ids,
                 )
             candidate = await discover_json_api(
-                recipe.list_.url, fetch, llm, previous_recipe=recipe, health=Health(ok=False, problems=feedback)
+                discovery_url, fetch, llm, previous_recipe=recipe, health=Health(ok=False, problems=feedback)
             )
             if candidate is None:
                 feedback.append("the public JSON list could not be rediscovered")
                 continue
             if portal_origin(candidate.list_.url) != origin:
                 raise RecipeValidationError("discovered JSON URL belongs to another portal")
-            await validate_candidate(candidate, fetch)
+            await validate_candidate(candidate, fetch, expected_document_ids=health.missing_document_ids)
             return candidate
         except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:
             feedback.append(str(exc))
