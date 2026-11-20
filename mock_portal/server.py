@@ -11,7 +11,8 @@ Switches (open in a browser or curl):
     /_state                   show current settings
 
 TODO(A2, P8): spa_json variant (JS app that loads tenders from /api/tenders),
-              a ZIP document, a 300 MB document to test the size cap.
+              a ZIP document, a 300 MB document to test the size cap,
+              later maybe a non-English variant (real portals are multilingual).
 """
 
 from fastapi import FastAPI, HTTPException
@@ -23,25 +24,25 @@ STATE = {"layout": "v1", "variant": "ssr"}
 PAGE_SIZE = 3
 
 TENDERS = [
-    {"id": "MOCK-001", "ref": "VG-2026-001", "title": "Straßensanierung Hauptstraße",
-     "buyer": "Stadt Musterstadt", "published": "20.11.2026", "deadline": "09.12.2026 10:00",
+    {"id": "MOCK-001", "ref": "PR-2026-001", "title": "Road resurfacing, Main Street",
+     "buyer": "City of Sampletown", "published": "20 Nov 2026", "deadline": "09 Dec 2026, 10:00",
      "cpv": "45233140-2"},
-    {"id": "MOCK-002", "ref": "VG-2026-002", "title": "Reinigung der Grundschule Nord",
-     "buyer": "Stadt Musterstadt", "published": "18.11.2026", "deadline": "15.12.2026 12:00",
+    {"id": "MOCK-002", "ref": "PR-2026-002", "title": "Cleaning services for North Primary School",
+     "buyer": "City of Sampletown", "published": "18 Nov 2026", "deadline": "15 Dec 2026, 12:00",
      "cpv": "90919200-4"},
-    {"id": "MOCK-003", "ref": "VG-2026-003", "title": "Lieferung von Büromöbeln",
-     "buyer": "Landkreis Beispiel", "published": "17.11.2026", "deadline": "05.01.2027 09:30",
+    {"id": "MOCK-003", "ref": "PR-2026-003", "title": "Supply of office furniture",
+     "buyer": "Example County Council", "published": "17 Nov 2026", "deadline": "05 Jan 2027, 09:30",
      "cpv": "39130000-2"},
-    {"id": "MOCK-004", "ref": "VG-2026-004", "title": "IT-Wartung Rathaus",
-     "buyer": "Gemeinde Probedorf", "published": "15.11.2026", "deadline": "11.12.2026 14:00",
+    {"id": "MOCK-004", "ref": "PR-2026-004", "title": "IT maintenance for the town hall",
+     "buyer": "Testville Municipality", "published": "15 Nov 2026", "deadline": "11 Dec 2026, 14:00",
      "cpv": "72250000-2"},
-    {"id": "MOCK-005", "ref": "VG-2026-005", "title": "Neubau Feuerwehrhaus",
-     "buyer": "Gemeinde Probedorf", "published": "12.11.2026", "deadline": "20.01.2027 11:00",
+    {"id": "MOCK-005", "ref": "PR-2026-005", "title": "Construction of a new fire station",
+     "buyer": "Testville Municipality", "published": "12 Nov 2026", "deadline": "20 Jan 2027, 11:00",
      "cpv": "45216121-8"},
 ]
 
-CAPTCHA_PAGE = """<html><body><h1>Bitte bestätigen Sie, dass Sie kein Roboter sind</h1>
-<form><div class="g-recaptcha" data-sitekey="mock"></div><button>Weiter</button></form></body></html>"""
+CAPTCHA_PAGE = """<html><body><h1>Please confirm you are not a robot</h1>
+<form><div class="g-recaptcha" data-sitekey="mock"></div><button>Continue</button></form></body></html>"""
 
 
 def _page(title: str, body: str) -> str:
@@ -57,18 +58,18 @@ def render_list(page: int = 1, layout: str = "v1") -> str:
             f'<tr><td><a href="/tender/{t["id"]}">{t["title"]}</a></td><td>{t["deadline"]}</td></tr>'
             for t in chunk
         )
-        pager = f'<a rel="next" href="/tenders?page={page + 1}">Weiter</a>' if has_next else ""
-        body = (f"<h1>Aktuelle Ausschreibungen</h1><table id=\"results\">"
-                f"<tr><th>Titel</th><th>Frist</th></tr>{rows}</table>{pager}")
+        pager = f'<a rel="next" href="/tenders?page={page + 1}">Next</a>' if has_next else ""
+        body = (f"<h1>Current tenders</h1><table id=\"results\">"
+                f"<tr><th>Title</th><th>Deadline</th></tr>{rows}</table>{pager}")
     else:
         cards = "".join(
             f'<div class="card"><h3><a href="/t/{t["id"]}">{t["title"]}</a></h3>'
             f'<span class="due">{t["deadline"]}</span></div>'
             for t in chunk
         )
-        pager = f'<a class="pager-next" href="/tenders?page={page + 1}">Nächste Seite</a>' if has_next else ""
-        body = f'<h2>Ausschreibungen</h2><div class="results">{cards}</div>{pager}'
-    return _page("Ausschreibungen", body)
+        pager = f'<a class="pager-next" href="/tenders?page={page + 1}">Next page</a>' if has_next else ""
+        body = f'<h2>Tenders</h2><div class="results">{cards}</div>{pager}'
+    return _page("Tenders", body)
 
 
 def render_detail(tender_id: str, layout: str = "v1") -> str | None:
@@ -78,24 +79,24 @@ def render_detail(tender_id: str, layout: str = "v1") -> str | None:
     if layout == "v1":
         body = (
             f"<h1>{t['title']}</h1><dl>"
-            f"<dt>Vergabenummer</dt><dd>{t['id']}</dd>"
-            f"<dt>Aktenzeichen</dt><dd>{t['ref']}</dd>"
-            f"<dt>Auftraggeber</dt><dd>{t['buyer']}</dd>"
-            f"<dt>Veröffentlicht am</dt><dd>{t['published']}</dd>"
-            f"<dt>Angebotsfrist</dt><dd>{t['deadline']}</dd>"
-            f"<dt>CPV-Code</dt><dd>{t['cpv']}</dd></dl>"
-            f'<a href="/download/{t["id"]}/vergabeunterlagen.pdf">Vergabeunterlagen herunterladen</a>'
+            f"<dt>Tender ID</dt><dd>{t['id']}</dd>"
+            f"<dt>Reference number</dt><dd>{t['ref']}</dd>"
+            f"<dt>Contracting authority</dt><dd>{t['buyer']}</dd>"
+            f"<dt>Published on</dt><dd>{t['published']}</dd>"
+            f"<dt>Submission deadline</dt><dd>{t['deadline']}</dd>"
+            f"<dt>CPV code</dt><dd>{t['cpv']}</dd></dl>"
+            f'<a href="/download/{t["id"]}/tender-documents.pdf">Download tender documents</a>'
         )
     else:
         body = (
             f'<h2 class="title">{t["title"]}</h2><table class="facts">'
-            f"<tr><th>Kennung</th><td>{t['id']}</td></tr>"
-            f"<tr><th>Az.</th><td>{t['ref']}</td></tr>"
-            f"<tr><th>Vergabestelle</th><td>{t['buyer']}</td></tr>"
-            f"<tr><th>Veröffentlichung</th><td>{t['published']}</td></tr>"
-            f"<tr><th>Abgabefrist</th><td>{t['deadline']}</td></tr>"
+            f"<tr><th>Identifier</th><td>{t['id']}</td></tr>"
+            f"<tr><th>Ref.</th><td>{t['ref']}</td></tr>"
+            f"<tr><th>Buyer</th><td>{t['buyer']}</td></tr>"
+            f"<tr><th>Publication</th><td>{t['published']}</td></tr>"
+            f"<tr><th>Closing date</th><td>{t['deadline']}</td></tr>"
             f"<tr><th>CPV</th><td>{t['cpv']}</td></tr></table>"
-            f'<a class="doc" href="/dl?tender={t["id"]}&amp;file=unterlagen.pdf">Unterlagen</a>'
+            f'<a class="doc" href="/dl?tender={t["id"]}&amp;file=documents.pdf">Documents</a>'
         )
     return _page(t["title"], body)
 

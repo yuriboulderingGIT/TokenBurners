@@ -9,19 +9,19 @@
   },
   "detail": { "link": ".//a[1]/@href" },
   "fields": {
-    "id": "//dt[contains(.,'Vergabenummer')]/following-sibling::dd[1]",
+    "id": "//dt[contains(.,'Tender ID')]/following-sibling::dd[1]",
     "title": "//h1",
-    "buyerName": "//dt[contains(.,'Auftraggeber')]/following-sibling::dd[1]",
-    "publicationDate": "//dt[contains(.,'Veröffentlicht')]/following-sibling::dd[1]",
-    "submissionDeadline": "//dt[contains(.,'Angebotsfrist')]/following-sibling::dd[1]",
-    "referenceNumber": "//dt[contains(.,'Aktenzeichen')]/following-sibling::dd[1]",
+    "buyerName": "//dt[contains(.,'Contracting authority')]/following-sibling::dd[1]",
+    "publicationDate": "//dt[contains(.,'Published')]/following-sibling::dd[1]",
+    "submissionDeadline": "//dt[contains(.,'Submission deadline')]/following-sibling::dd[1]",
+    "referenceNumber": "//dt[contains(.,'Reference number')]/following-sibling::dd[1]",
     "cpvCodes": "//dt[contains(.,'CPV')]/following-sibling::dd[1]"
   },
   "documents": {
     "link": "//a[contains(@href,'/download/')]/@href",
     "steps": []
   },
-  "locale": { "tz": "Europe/Berlin", "lang": "de", "country": "DE" },
+  "locale": { "tz": "Europe/Dublin", "lang": "en", "country": "IE" },
   "learned_by": "hand-written",
-  "learned_at": "2026-11-20T10:00:00+01:00"
+  "learned_at": "2026-11-20T10:00:00+00:00"
 }

@@ -29,11 +29,13 @@ def test_recipe_reads_mock_v1() -> None:
 
     detail = html.fromstring(render_detail("MOCK-001", "v1"))
     assert _text(detail, RECIPE.fields["id"]) == "MOCK-001"
-    assert _text(detail, RECIPE.fields["title"]) == "Straßensanierung Hauptstraße"
-    assert _text(detail, RECIPE.fields["buyerName"]) == "Stadt Musterstadt"
-    assert _text(detail, RECIPE.fields["submissionDeadline"]) == "09.12.2026 10:00"
+    assert _text(detail, RECIPE.fields["title"]) == "Road resurfacing, Main Street"
+    assert _text(detail, RECIPE.fields["buyerName"]) == "City of Sampletown"
+    assert _text(detail, RECIPE.fields["publicationDate"]) == "20 Nov 2026"
+    assert _text(detail, RECIPE.fields["submissionDeadline"]) == "09 Dec 2026, 10:00"
+    assert _text(detail, RECIPE.fields["referenceNumber"]) == "PR-2026-001"
     assert _text(detail, RECIPE.fields["cpvCodes"]) == "45233140-2"
-    assert _text(detail, RECIPE.documents.link) == "/download/MOCK-001/vergabeunterlagen.pdf"
+    assert _text(detail, RECIPE.documents.link) == "/download/MOCK-001/tender-documents.pdf"
 
 
 def test_layout_v2_breaks_recipe_v1() -> None:
