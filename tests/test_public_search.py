@@ -72,15 +72,18 @@ def test_unpaged_public_search_rejects_partial_records(monkeypatch):
         observed = ObservedSearch.observe(url, request, PublicVisit(fetch), 0)
         return [(observed, await observed.read(0, 0))]
     monkeypatch.setattr(js_discover, "_capture_json", capture)
-    recipe = Recipe.model_validate({"kind": "json_api", "list": {
-        "url": SOURCE, "item": "$.items[*]", "search": {
-            "endpoint": ENDPOINT, "media_type": "application/json", "total_path": ["meta", "nombre"]}},
-        "fields": {"id": "$.id", "title": "$.title"}})
+    class Model:
+        model_name = "fixture"
+
+        async def json(self, *args, **kwargs):
+            return {"endpoint": 0, "recipe": {"list": {"item": "$.items[*]", "total_path": ["meta", "nombre"]},
+                                              "fields": {"id": "$.id", "title": "$.title"}}}
 
     async def exercise():
         client = Fetcher(min_interval=0, transport=httpx.MockTransport(lambda req: httpx.Response(
             200, json={"items": [{"id": "1", "title": "Pont"}], "meta": {"nombre": 17}})))
         try:
+            recipe = await js_discover.discover_json_api(SOURCE, client.for_portal("test"), Model())
             with pytest.raises(PaginationError, match="17 tenders.*only 1"):
                 await run_recipe(recipe, client.for_portal("test"))
         finally:

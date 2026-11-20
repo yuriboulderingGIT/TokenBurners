@@ -113,7 +113,7 @@ async def discover_json_api(
     if isinstance(key, ObservedSearch):
         search = key.spec.model_copy()
         search.html_path = fragment_path(payload)
-        total_path = candidate.get("total_path", result.get("total_path"))
+        total_path = list_spec.get("total_path", candidate.get("total_path", result.get("total_path")))
         if isinstance(total_path, list) and total_path and all(isinstance(k, str) for k in total_path):
             value = at_path(payload, total_path)
             if str(value).isdigit():
