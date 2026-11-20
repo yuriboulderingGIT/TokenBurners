@@ -19,7 +19,7 @@ from brain.llm import ScopedLLM
 from brain.normalize import _single_text
 from brain.run_recipe import (
     Origin, PaginationError, RecipeReadError, _field_value, _navigation_url, _observed_href, _selector,
-    canonical_origin, fetch_page, is_json_response, portal_origin,
+    canonical_origin, document_base, fetch_page, is_json_response, portal_origin,
 )
 
 MAX_TRIES = 3
@@ -34,7 +34,8 @@ def _entries_with_links(
     entries = _selector("html", recipe.list_.item, "list.item")(listing.document)
     link = _selector("html", recipe.detail.link, "detail.link")
     for entry in entries:
-        yield entry, _navigation_url(listing.url, link(entry), origin, "detail.link", source=entry)
+        yield entry, _navigation_url(document_base(listing.document, listing.url), link(entry), origin,
+                                     "detail.link", source=entry)
 
 
 async def _repair_detail(
@@ -85,7 +86,7 @@ def _check_stored_detail(
             source = detail.document
         elif (
             isinstance(entry, html.HtmlElement)
-            and _observed_href(entry, listing.url, detail.requested_url)
+            and _observed_href(entry, document_base(listing.document, listing.url), detail.requested_url)
             and contains_stored_id(entry, expected)
         ):
             # A row can also link to related tenders. Pair the link with the actual ID on this row.

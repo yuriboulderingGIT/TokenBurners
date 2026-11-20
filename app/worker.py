@@ -3,7 +3,8 @@
 - A queue of reads; WORKER_CONCURRENCY reads run at the same time (different portals).
 - At most one read per portal at a time: refresh while one is queued/running returns its runId.
 - A timer re-reads every portal every REFRESH_MINUTES. Failed portals get a plain re-read every
-  FAILED_RETRY_MINUTES; one that never attached is left alone until a manual refresh.
+  FAILED_RETRY_MINUTES; one that never attached is left alone until a manual refresh, unless the
+  portal was unreachable before any model call (TemporaryAttachFailure).
 - Pipeline per read:  attach (first time) -> run_recipe -> normalize -> documents ->
   health check -> store + serving,  or  healing -> repair -> re-read -> serving | failed.
 
@@ -32,17 +33,18 @@ from app.config import (
 )
 from app.db import DB
 from app.documents import store_documents
-from app.fetcher import Fetcher, PortalCancelled, PortalFetcher
+from app.fetcher import Fetcher, PortalCancelled, PortalFetcher, RunPageCache
 from app.health import check_health
 from app.models import Health, ReadResult, Recipe, Tender
 from brain.blocks import Blocked
-from brain.learn import AttachFailed, learn_recipe
+from brain.learn import AttachFailed, TemporaryAttachFailure, learn_recipe
 from brain.llm import LLM, BudgetExceeded, LLMUnavailable
 from brain.normalize import normalize
 from brain.repair import repair
 from brain.run_recipe import PaginationError, RecipeReadError, run_recipe
 
 log = logging.getLogger("watchtower.worker")
+_TEMPORARY_ATTACH = "could not attach (temporary portal error): "
 
 
 class Worker:
@@ -96,7 +98,8 @@ class Worker:
 
     def _queue_due_reads(self) -> None:
         for portal in self.db.portal_list():
-            if portal["state"] == states.FAILED and portal["recipe_version"] is None:
+            if (portal["state"] == states.FAILED and portal["recipe_version"] is None
+                    and not (portal["reason"] or "").startswith(_TEMPORARY_ATTACH)):
                 # It never attached, so a timed retry could only ask the model again (and get
                 # charged every FAILED_RETRY_MINUTES). Timed retries must cost nothing: only a
                 # manual refresh tries the attach again.
@@ -150,8 +153,9 @@ class Worker:
         if portal is None:
             self.db.run_finish(run_id, "failed", "portal was deleted")
             return False
-        fetch = self.fetcher.for_portal(portal_id)
         recipe = repaired_recipe if repaired_recipe is not None else self.db.recipe_latest(portal_id)
+        # Attach validates the whole listing; the first read in the same run reuses those pages.
+        fetch = RunPageCache(self.fetcher, portal_id) if recipe is None else self.fetcher.for_portal(portal_id)
         cost = 0.0
         try:
             if recipe is None:
@@ -211,7 +215,8 @@ class Worker:
             self.db.run_finish(run_id, "failed", cost_usd=cost)
         except AttachFailed as e:
             reason = str(e).strip() or "no working extraction recipe was found"
-            states.set_state(self.db, portal_id, states.FAILED, f"could not attach: {reason}", run_id)
+            prefix = _TEMPORARY_ATTACH if isinstance(e, TemporaryAttachFailure) else "could not attach: "
+            states.set_state(self.db, portal_id, states.FAILED, prefix + reason, run_id)
             self.db.run_finish(run_id, "failed", cost_usd=cost)
         except Exception as e:
             log.exception("read %s failed", run_id)

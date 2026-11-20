@@ -4,6 +4,7 @@ import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import cached_property
 from urllib.parse import urlsplit
 
 import httpx
@@ -11,7 +12,7 @@ from lxml import etree, html
 from pydantic import ValidationError
 
 from app.db import now_iso
-from app.fetcher import PortalFetcher
+from app.fetcher import RETRY_STATUSES, PortalFetcher
 from app.health import check_health
 from app.models import OPTIONAL_TENDER_FIELDS, ReadResult, Recipe, Tender
 from brain.blocks import Blocked, detect_block
@@ -20,9 +21,9 @@ from brain.normalize import normalize
 from brain.run_recipe import (
     MAX_PAGES, MissedNextPage, NoPublicNextLink, Origin, PaginationError, RecipeReadError, advertised_next_urls,
     _advertised_total_count, canonical_origin, empty_search_url, fetch_page, is_json_response, next_page_controls,
-    portal_origin,
-    resolve_portal_url, run_recipe,
+    document_base, navigation_view, portal_origin, resolve_portal_url, run_recipe,
 )
+from brain.public_search import api_subdomain
 from brain.shrink import shrink
 
 _SAMPLE_SIZE = 3
@@ -48,6 +49,10 @@ _SYSTEM = (
 
 class AttachFailed(Exception):
     """Could not learn a working recipe. The message becomes the portal's reason."""
+
+
+class TemporaryAttachFailure(AttachFailed):
+    """The portal was unreachable before any model call, so a timed retry costs nothing."""
 
 
 class RecipeValidationError(ValueError):
@@ -88,6 +93,11 @@ class PageSample:
     document: html.HtmlElement | None = None
     requested_url: str | None = None
 
+    @cached_property
+    def navigation(self) -> html.HtmlElement | None:
+        """The document with <base href> applied to its links, for pagination and search forms."""
+        return navigation_view(self.document, self.url) if self.document is not None else None
+
     def evidence(self) -> dict:
         links = {url: label[:160] for url, label in self.links.items()}
         evidence = {"url": self.url, "html": self.markup, "links": links}
@@ -97,7 +107,7 @@ class PageSample:
                 evidence["sample_row"] = shrink(html.tostring(rows[0], encoding="unicode"), max_chars=2200)
             evidence["pagination"] = [
                 html.tostring(node, encoding="unicode", with_tail=False)[:500]
-                for node in next_page_controls(self.document, self.url)[:4]
+                for node in next_page_controls(self.navigation, self.url)[:4]
             ]
             summaries = []
             for anchor in self.document.xpath("//p/a[@href] | //footer//a[@href]"):
@@ -137,7 +147,7 @@ def _page_sample(
         document = html.fromstring(page)
     except (ValueError, etree.ParserError):
         document = None
-    links = _page_links(document, current_url, origin, stored_ids) if document is not None else {}
+    links = _page_links(document, document_base(document, current_url), origin, stored_ids) if document is not None else {}
     return PageSample(
         current_url, shrink(page, max_chars=16_000), links, document, requested_url or current_url,
     )
@@ -179,7 +189,7 @@ def _page_links(
 def _observed_url(value: object, page: PageSample, origin: Origin) -> str | None:
     if not isinstance(value, str):
         return None
-    url = resolve_portal_url(page.url, value, origin)
+    url = resolve_portal_url(document_base(page.document, page.url), value, origin)
     return url if url == page.url or url in page.links else None
 
 
@@ -360,7 +370,8 @@ async def _learn_public_feed(listing: PageSample, fetch: PortalFetcher, llm: Sco
     candidate = await discover_json_api(listing.url, fetch, llm)
     if candidate is None:
         raise RecipeValidationError(reason)
-    if portal_origin(candidate.list_.url) != portal_origin(listing.url):
+    feed, page = portal_origin(candidate.list_.url), portal_origin(listing.url)
+    if feed != page and not api_subdomain(page, feed):
         raise RecipeValidationError("discovered JSON URL belongs to another portal")
     await validate_candidate(candidate, fetch)
     return candidate
@@ -374,7 +385,12 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
     if origin is None:
         raise AttachFailed("portal URL must use HTTP(S) without credentials")
     try:
-        response = await fetch_page(fetch, clean_url, origin, entry_redirects=True)
+        try:
+            response = await fetch_page(fetch, clean_url, origin, entry_redirects=True)
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            if isinstance(exc, httpx.TransportError) or exc.response.status_code in RETRY_STATUSES:
+                raise TemporaryAttachFailure(str(exc) or type(exc).__name__) from exc
+            raise
         origin = portal_origin(str(response.url))
         assert origin is not None  # fetch_page checked every redirect target.
         if is_json_response(response):
@@ -392,7 +408,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
         navigation_calls = 0
         for step in range(2):
             navigation_calls += 1
-            search_url = empty_search_url(listing.document, listing.url)
+            search_url = empty_search_url(listing.navigation, listing.url)
             discovery = await llm.json(json.dumps({
                 "task": (
                     "Locate the complete public tender listing in the language of these pages. "
@@ -420,7 +436,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
             if listing.document is not None and len(listing.document.xpath("//tr[td[3] and td//a[@href]]")) >= 2:
                 # A paged results table is already a listing, even if its menu
                 # also advertises an advanced-search or category directory.
-                if next_page_controls(listing.document, listing.url):
+                if next_page_controls(listing.navigation, listing.url):
                     target = listing.url
             if target is None:
                 if step == 0:
@@ -451,7 +467,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
         if listing is not entry and _script_shell(listing):
             return await _learn_public_feed(listing, fetch, llm, shell_reason)
         try:
-            next_links = advertised_next_urls(listing.document, listing.url)
+            next_links = advertised_next_urls(listing.navigation, listing.url)
         except NoPublicNextLink as exc:
             reason = f"{exc} and no usable public tender feed was found"
             return await _learn_public_feed(listing, fetch, llm, reason)
@@ -495,7 +511,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                         raise AttachFailed(str(error)) from error
                     feedback = []
                     pagination_page = None
-    search_url = empty_search_url(listing.document, listing.url)
+    search_url = empty_search_url(listing.navigation, listing.url)
     if search_url and search_url not in visited and feedback == ["the list selector found no tenders"]:
         try:
             search_listing = await read_page_sample(search_url, fetch, origin)

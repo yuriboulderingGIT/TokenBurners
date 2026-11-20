@@ -1,5 +1,6 @@
 """Read tenders and document links from a saved recipe without model calls."""
 
+import copy
 import hashlib
 import json
 import logging
@@ -127,6 +128,7 @@ async def run_recipe(
             seen_pages.update((page_url, current_url))
             page = _parse_page(response, recipe.kind)
             sample_page = response if recipe.kind == "html" else None
+        link_base = document_base(page, current_url)
         entries = [entry for entry in _flatten(item(page)) if entry is not None]
         if sample_page is not None:
             _check_block(sample_page, content_available=bool(entries))
@@ -151,24 +153,25 @@ async def run_recipe(
             raise PaginationError(f"list.item found no tenders on page {page_number}", sample_page)
         observed_count += len(entries)
         advertised_count = max(advertised_count, _advertised_total_count(page))
+        nav_page = navigation_view(page, current_url)
         if search_pages:
             following = page_url if search_pages.more(entries, observed_count) else None
-        elif isinstance(page, html.HtmlElement) and _declared_last_page(page, current_url):
+        elif isinstance(page, html.HtmlElement) and _declared_last_page(nav_page, current_url):
             following = None
         else:
             try:
-                advertised, get_forms = _advertised_pagination(page, current_url)
+                advertised, get_forms = _advertised_pagination(nav_page, current_url)
                 if advertised == get_forms and len(get_forms) == 1:
                     following = next(iter(get_forms))
                 else:
-                    selected = next_page(page)
+                    selected = next_page(nav_page)
                     if (isinstance(page, html.HtmlElement) and not advertised and selected
-                            and _last_numbered_page(page, current_url)):
+                            and _last_numbered_page(nav_page, current_url)):
                         if all(link.lower().replace(" ", "") in {"javascript:void(0);", "javascript:void(0)", "#"}
                                for link in _strings(selected, links=True)):
                             selected = []
                     following = _navigation_url(
-                        current_url, selected, origin, "list.next_page", source=page, advertised=advertised,
+                        current_url, selected, origin, "list.next_page", source=nav_page, advertised=advertised,
                     )
             except RecipeReadError as exc:
                 raise PaginationError(str(exc), sample_page) from exc
@@ -193,9 +196,10 @@ async def run_recipe(
         for entry in entries:
             source = entry
             tender_url = current_url
+            source_base = link_base
             if recipe.detail.link is not None:
                 link = _navigation_url(
-                    current_url, detail(entry), origin, "detail.link", source=entry
+                    link_base, detail(entry), origin, "detail.link", source=entry
                 )
                 if link is None:
                     raise RecipeReadError("detail.link found no URL for a list entry")
@@ -206,6 +210,7 @@ async def run_recipe(
                     continue
                 tender_url = str(detail_response.url)
                 source = _parse_page(detail_response, recipe.kind)
+                source_base = document_base(source, tender_url)
 
             values = {
                 name: _field_value(selector(source))
@@ -214,8 +219,8 @@ async def run_recipe(
             document_urls = list(dict.fromkeys(
                 url
                 for value in _strings(documents(source), links=True)
-                if (url := _resolve_http_url(tender_url, value)) is not None
-                and _observed_href(source, tender_url, url)
+                if (url := _resolve_http_url(source_base, value)) is not None
+                and _observed_href(source, source_base, url)
             ))
             if recipe.kind == "html" and recipe.detail.link is not None:
                 _check_block(
@@ -226,7 +231,7 @@ async def run_recipe(
                 # Keep attachment links supported by HTML metadata or an actual file name.
                 attachments = set()
                 for anchor in source.xpath("descendant-or-self::a[@href]"):
-                    url = _resolve_http_url(tender_url, anchor.get("href"))
+                    url = _resolve_http_url(source_base, anchor.get("href"))
                     if url not in document_urls:
                         continue
                     if ("download" in anchor.attrib or "enclosure" in anchor.get("rel", "").split()
@@ -243,11 +248,11 @@ async def run_recipe(
                 else:
                     tender_url = resolve_portal_url(tender_url, values["url"], origin) or tender_url
             if recipe.detail.link is None and tender_url == current_url and isinstance(entry, html.HtmlElement):
-                tender_url = _title_link(entry, values.get("title"), current_url, origin, document_urls) or current_url
+                tender_url = _title_link(entry, values.get("title"), link_base, origin, document_urls) or current_url
                 if search_pages and tender_url == current_url and isinstance(values.get("id"), str):
                     matches = set()
                     for href in entry.xpath(".//a[not(@download)]/@href"):
-                        url = resolve_portal_url(current_url, href, origin)
+                        url = resolve_portal_url(link_base, href, origin)
                         if url and url not in document_urls:
                             parts = urlsplit(url)
                             if (parts.path.rstrip("/").rsplit("/", 1)[-1] == values["id"]
@@ -334,12 +339,13 @@ def _selector(kind: str, expression: str | None, label: str) -> Selector:
 
 async def fetch_page(
     fetch: PortalFetcher, url: str, origin: Origin, *, entry_redirects: bool = False,
+    headers: dict[str, str] | None = None,
 ) -> httpx.Response:
     """Check redirects before requesting them, under the same portal rate limit."""
     if portal_origin(url) != origin:
         raise RecipeReadError("page URL is outside the recipe's origin")
     for _ in range(_MAX_REDIRECTS + 1):
-        response = await fetch.get(url, follow_redirects=False)
+        response = await fetch.get(url, follow_redirects=False, **({"headers": headers} if headers else {}))
         if response.status_code not in _REDIRECT_STATUSES:
             if not response.is_success:
                 _check_block(response)
@@ -660,6 +666,34 @@ def _observed_href(source: Any, base_url: str, url: str) -> bool:
         _resolve_http_url(base_url, href) == url
         for href in source.xpath("descendant-or-self::a/@href")
     )
+
+
+def document_base(page: Any, url: str) -> str:
+    """Relative links resolve against the page's <base href> when it declares one."""
+    if isinstance(page, html.HtmlElement):
+        for href in page.xpath("//base/@href")[:1]:
+            return _resolve_http_url(url, href) or url
+    return url
+
+
+def navigation_view(page: Any, url: str) -> Any:
+    """With a <base href>, a copy whose links and form actions are absolute.
+
+    Pagination compares link targets with the page's own URL, so it reads this copy;
+    list rows keep their original hrefs, which recipes may use as tender ids.
+    """
+    base = document_base(page, url)
+    if base == url:
+        return page
+    view = copy.deepcopy(page)
+    for node in view.xpath("//*[@href] | //form[@action]"):
+        attribute = "action" if node.tag == "form" else "href"
+        value = node.get(attribute, "").strip()
+        # Empty actions submit to the page itself; placeholders stay placeholders.
+        if value and not value.startswith("#") and not value.lower().startswith("javascript:"):
+            if absolute := _resolve_http_url(base, value):
+                node.set(attribute, absolute)
+    return view
 
 
 def resolve_portal_url(base_url: str, value: str, origin: Origin) -> str | None:

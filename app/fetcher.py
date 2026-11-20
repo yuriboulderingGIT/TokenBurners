@@ -22,6 +22,7 @@ Notes for other agents:
 
 import asyncio
 import hashlib
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 import logging
 import tempfile
 import time
@@ -72,7 +73,10 @@ class Fetcher:
             timeout=timeout,
             transport=transport,
             headers={"User-Agent": USER_AGENT},
+            # The shared client keeps no cookies; each portal has its own jar (see _send).
+            cookies=CookieJar(DefaultCookiePolicy(allowed_domains=[])),
         )
+        self._jars: dict[str, httpx.Cookies] = {}
         self._portal_last: dict[str, float] = {}
         self._host_last: dict[str, float] = {}
         self._portal_locks: dict[str, asyncio.Lock] = {}
@@ -165,7 +169,10 @@ class Fetcher:
         """Send one request, following redirects by hand: each hop is a request and waits its turn."""
         for _ in range(MAX_REDIRECTS + 1):
             await self.wait_turn(portal_id, str(request.url))
+            jar = self._jars.setdefault(portal_id, httpx.Cookies())
+            jar.set_cookie_header(request)  # keeps an explicit Cookie header, e.g. a PublicVisit's
             response = await self._client.send(request, stream=stream)
+            jar.extract_cookies(response)
             if not follow_redirects or response.next_request is None:
                 return response
             await response.aclose()
@@ -176,9 +183,10 @@ class Fetcher:
         await self._client.aclose()
 
     async def public_search(self, portal_id: str, url: str, *, content: bytes, media_type: str,
-                            cookies: httpx.Cookies) -> httpx.Response:
-        """Send one anonymous search with only the cookies from its public page visit."""
+                            cookies: httpx.Cookies, headers: dict[str, str] | None = None) -> httpx.Response:
+        """Send one anonymous search with only the cookies (and anti-forgery headers) from its public page visit."""
         request = httpx.Request("POST", url, content=content, headers={
+            **(headers or {}),
             "Content-Type": media_type, "User-Agent": USER_AGENT, "Accept": "application/json, text/html",
             "X-Requested-With": "XMLHttpRequest",
         })
@@ -196,8 +204,10 @@ class PortalFetcher:
     async def get(self, url: str, **kw) -> httpx.Response:
         return await self.fetcher.get(self.portal_id, url, **kw)
 
-    async def public_search(self, url: str, *, content: bytes, media_type: str, cookies: httpx.Cookies) -> httpx.Response:
-        return await self.fetcher.public_search(self.portal_id, url, content=content, media_type=media_type, cookies=cookies)
+    async def public_search(self, url: str, *, content: bytes, media_type: str, cookies: httpx.Cookies,
+                            headers: dict[str, str] | None = None) -> httpx.Response:
+        return await self.fetcher.public_search(self.portal_id, url, content=content, media_type=media_type,
+                                                cookies=cookies, headers=headers)
 
     async def stream(self, url: str, max_bytes: int, dest_dir: Path | None = None) -> Downloaded | TooLarge:
         return await self.fetcher.stream(self.portal_id, url, max_bytes, dest_dir)
@@ -205,6 +215,32 @@ class PortalFetcher:
     async def wait_turn(self, url: str = "") -> None:
         """For Playwright: call this before letting the browser make a request."""
         await self.fetcher.wait_turn(self.portal_id, url)
+
+
+class RunPageCache(PortalFetcher):
+    """Replays GETs already answered in this run, so an attach's first read reuses the pages
+    its validation just walked. Use for one run only: later reads must fetch fresh pages.
+    Streams (documents) and public searches (POST) always go to the portal.
+    """
+
+    MAX_BYTES = 64 * 1024 * 1024  # shortcut: stops caching past this; enough for 100 list pages
+
+    def __init__(self, fetcher: Fetcher, portal_id: str) -> None:
+        super().__init__(fetcher, portal_id)
+        self._pages: dict[tuple[str, str], httpx.Response] = {}
+        self._bytes = 0
+
+    async def get(self, url: str, **kw) -> httpx.Response:
+        key = (url, repr(sorted(kw.items())))
+        if (cached := self._pages.get(key)) is not None:
+            if self.portal_id in self.fetcher._cancelled:
+                raise PortalCancelled(self.portal_id)
+            return cached
+        response = await super().get(url, **kw)
+        if response.status_code < 400 and self._bytes + len(response.content) <= self.MAX_BYTES:
+            self._pages[key] = response
+            self._bytes += len(response.content)
+        return response
 
 
 class FakeFetcher(Fetcher):
