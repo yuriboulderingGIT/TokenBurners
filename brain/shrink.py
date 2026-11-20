@@ -7,7 +7,7 @@ from lxml import etree, html
 _DROP = {"script", "style", "svg", "noscript", "template"}
 _ATTRIBUTES = {
     "id", "class", "href", "title", "rel", "role", "lang", "itemprop", "datetime",
-    "aria-label", "data-testid", "data-id", "data-tender-id", "download",
+    "aria-label", "data-testid", "data-id", "data-oid", "data-tender-id", "download",
 }
 _REPEATED = {"article", "div", "li", "tr"}
 

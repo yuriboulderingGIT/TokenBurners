@@ -1,6 +1,7 @@
 """Learn and test a recipe for a public tender portal."""
 
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -12,13 +13,13 @@ from pydantic import ValidationError
 from app.db import now_iso
 from app.fetcher import PortalFetcher
 from app.health import check_health
-from app.models import ReadResult, Recipe, Tender
+from app.models import OPTIONAL_TENDER_FIELDS, ReadResult, Recipe, Tender
 from brain.blocks import Blocked, detect_block
 from brain.llm import ScopedLLM
 from brain.normalize import normalize
 from brain.run_recipe import (
     MAX_PAGES, MissedNextPage, NoPublicNextLink, Origin, PaginationError, RecipeReadError, advertised_next_urls,
-    fetch_page, is_json_response, portal_origin,
+    _advertised_total_count, canonical_origin, fetch_page, is_json_response, next_page_controls, portal_origin,
     resolve_portal_url, run_recipe,
 )
 from brain.shrink import shrink
@@ -27,7 +28,8 @@ _SAMPLE_SIZE = 3
 _MAX_LINKS = 60
 _ALL_LISTINGS_LABELS = {"view all tenders", "view all notices", "view all opportunities"}
 _LABELLED_NEXT = (
-    "//a[@href and (@rel='next' or "
+    "//*[self::a or self::link][@href and (@rel='next' or "
+    "translate(normalize-space(@title), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='next page' or "
     "translate(normalize-space(@aria-label), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
     "'abcdefghijklmnopqrstuvwxyz')='next page') and not(ancestor-or-self::*"
     "[@disabled or @hidden or @aria-disabled='true' or @aria-hidden='true' or "
@@ -87,7 +89,23 @@ class PageSample:
 
     def evidence(self) -> dict:
         links = {url: label[:160] for url, label in self.links.items()}
-        return {"url": self.url, "html": self.markup, "links": links}
+        evidence = {"url": self.url, "html": self.markup, "links": links}
+        if self.document is not None:
+            rows = self.document.xpath("//tr[@data-oid or @data-id or td//a[@href]] | //article[.//a[@href]]")
+            if rows:
+                evidence["sample_row"] = shrink(html.tostring(rows[0], encoding="unicode"), max_chars=2200)
+            evidence["pagination"] = [
+                html.tostring(node, encoding="unicode", with_tail=False)[:500]
+                for node in next_page_controls(self.document, self.url)[:4]
+            ]
+            summaries = []
+            for anchor in self.document.xpath("//p/a[@href] | //footer//a[@href]"):
+                context = " ".join(anchor.getparent().text_content().split())
+                if len(context) <= 220 and len(re.findall(r"\b\d+\b", context)) >= 2:
+                    summaries.append(context)
+            if summaries:
+                evidence["counts_and_links"] = summaries[:5]
+        return evidence
 
 
 def contains_stored_id(document: html.HtmlElement | None, expected: str) -> bool:
@@ -129,10 +147,18 @@ def _page_links(
 ) -> dict[str, str]:
     links: dict[str, str] = {}
     known_links: dict[str, str] = {}
-    for anchor in document.xpath("//a[@href and not(@download) and not(contains(concat(' ', @rel, ' '), ' next '))]"):
+    anchors = document.xpath("//a[@href and not(@download) and not(contains(concat(' ', @rel, ' '), ' next '))]")
+    # Reserve room for links in the page content when a large site menu comes first.
+    anchors.sort(key=lambda a: bool(a.xpath("ancestor::nav | ancestor::footer | ancestor::*[@role='navigation']")))
+    for anchor in anchors:
         target = resolve_portal_url(url, anchor.get("href"), origin)
+        if target is None:
+            alias = portal_origin(anchor.get("href", ""))
+            if alias and canonical_origin(origin, alias):
+                target = resolve_portal_url(url, anchor.get("href"), alias)
         if target and len(target) <= 2_048 and not urlsplit(target).path.lower().endswith(_FILES):
-            label = " ".join(anchor.text_content().split())
+            label = " ".join((anchor.text_content().strip() or anchor.get("aria-label")
+                              or anchor.get("title") or "").split())
             if len(links) < _MAX_LINKS:
                 links.setdefault(target, label)
             if stored_ids and (target in stored_ids.by_url or label in stored_ids.by_title):
@@ -237,7 +263,8 @@ async def propose_html_recipe(
             "a relative XPath returning the detail href per row, or null if the row supplies "
             "the data. Field and document XPaths run on the detail page, or relative to "
             "the row when there is no detail link. Prefer label-based selectors. Use "
-            "fields.id for the exact portal-issued ID. Map title, buyerName, publicationDate, "
+            "XPath 1.0 only. Use fields.id for the exact portal-issued ID, including a row's "
+            "data-oid when present. Use a class-token match to distinguish adjacent columns. Map title, buyerName, publicationDate, "
             "submissionDeadline and status to their source values. Use fields.url for the "
             "tender's own permalink when shown. Look for referenceNumber, description, "
             "procedureType, contractNature and cpvCodes. Map the place of performance "
@@ -274,6 +301,18 @@ async def propose_html_recipe(
         raise RecipeValidationError("the proposal does not match the recipe schema") from exc
     if candidate.kind != "html" or candidate.list_.url != listing.url:
         raise RecipeValidationError("the recipe must use the supplied HTML list URL")
+    # The model occasionally emits XPath 2.0 functions for optional metadata.
+    # Drop only unsupported optional expressions; ID, title and navigation must validate.
+    probe = listing.document
+    if detail is not None and candidate.detail.link:
+        probe = detail.document
+    if probe is not None:
+        for key, expression in list(candidate.fields.items()):
+            if key.partition(".")[0] in OPTIONAL_TENDER_FIELDS:
+                try:
+                    etree.XPath(expression, regexp=False)(probe)
+                except etree.XPathError:
+                    del candidate.fields[key]
     try:
         await validate_candidate(candidate, fetch, expected_document_ids=expected_document_ids, stored_ids=stored_ids)
     except MissedNextPage:
@@ -290,7 +329,13 @@ async def propose_html_recipe(
 
 def _script_shell(page: PageSample) -> bool:
     doc = page.document
-    if doc is None or page.links or not doc.xpath("//script") or not doc.xpath("//body"):
+    if doc is None or not doc.xpath("//script") or not doc.xpath("//body"):
+        return False
+    if (doc.xpath("//*[@id='app' or @id='root' or @id='__nuxt'][not(*) and not(normalize-space())]")
+            and doc.xpath("//script[@type='module' and @src]")
+            and not doc.xpath("//tr[td[3]] | //article[.//a[@href]]")):
+        return True
+    if page.links:
         return False
     visible_text = doc.xpath(
         "//body//text()[normalize-space() and not(ancestor::noscript or ancestor::script "
@@ -332,42 +377,88 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
         shell_reason = "the listing requires JavaScript and no usable public tender feed was found"
         if _script_shell(entry):
             return await _learn_public_feed(entry, fetch, llm, shell_reason)
-        discovery = await llm.json(
-            json.dumps({
+        listing = entry
+        visited = {entry.url}
+        navigation_calls = 0
+        for step in range(2):
+            navigation_calls += 1
+            discovery = await llm.json(json.dumps({
                 "task": (
-                    "Identify the public tender listing and one example tender detail page. "
-                    "Return list_url equal to the entry URL or an observed link; use the "
-                    "entry URL if it already lists tenders or loads them with JavaScript. "
-                    "On a market overview with featured tenders, prefer the link to the full tender listing. "
-                    "Return detail_url only if it is an observed link to a tender; otherwise null."
+                    "Locate the complete public tender listing in the language of these pages. "
+                    "Choose list_url from entry.links or the current URL. An overview showing a few of "
+                    "many results is a preview: follow its link to the complete results. "
+                    "If the link leads to another navigation page, return intermediate=true and "
+                    "we will inspect it. Prefer public listings over search forms or sign-in pages. "
+                    "Return detail_url only for an observed individual tender, otherwise null."
                 ),
-                "entry": entry.evidence(),
-            }, ensure_ascii=False),
-            system=_SYSTEM,
-        )
-        if not isinstance(discovery, dict):
-            raise RecipeValidationError("the model did not identify a listing")
-        list_url = _observed_url(discovery.get("list_url", entry.url), entry, origin)
-        if list_url is None:
-            raise RecipeValidationError("listing URL was not observed on the portal")
-        listing = entry if list_url == entry.url else await read_page_sample(list_url, fetch, origin)
+                "entry": listing.evidence(),
+                "visited": sorted(visited),
+            }, ensure_ascii=False), system=_SYSTEM)
+            if not isinstance(discovery, dict):
+                raise RecipeValidationError("the model did not identify a listing")
+            target = _observed_url(discovery.get("list_url", listing.url), listing, origin)
+            linked = discovery.get("list_url")
+            if target is None and isinstance(linked, str) and linked in listing.links:
+                alias = portal_origin(linked)
+                if alias and canonical_origin(origin, alias):
+                    target = linked
+            if listing.document is not None and len(listing.document.xpath("//tr[td[3] and td//a[@href]]")) >= 2:
+                # A paged results table is already a listing, even if its menu
+                # also advertises an advanced-search or category directory.
+                if next_page_controls(listing.document, listing.url):
+                    target = listing.url
+            if target is None:
+                if step == 0:
+                    # Retry with only legal destinations so a URL copied from unrelated markup
+                    # cannot displace an actual public directory link.
+                    choices = list(listing.links)
+                    navigation_calls += 1
+                    answer = await llm.json(json.dumps({
+                        "task": "Choose the index of the public tender directory. Return index or null.",
+                        "choices": [{"index": i, "url": u, "label": listing.links[u]} for i, u in enumerate(choices)],
+                    }, ensure_ascii=False), system=_SYSTEM)
+                    i = answer.get("index") if isinstance(answer, dict) else None
+                    target = choices[i] if type(i) is int and 0 <= i < len(choices) else None
+                if target is None:
+                    raise RecipeValidationError("listing URL was not observed on the portal")
+            if target == listing.url:
+                break
+            if target in visited:
+                raise RecipeValidationError("listing navigation returned to a previous page")
+            target_origin = portal_origin(target)
+            if target_origin is None or not canonical_origin(origin, target_origin):
+                raise RecipeValidationError("listing navigation left the portal")
+            origin = target_origin
+            listing = await read_page_sample(target, fetch, origin)
+            visited.add(listing.url)
+            if discovery.get("intermediate") is not True:
+                break
         if listing is not entry and _script_shell(listing):
             return await _learn_public_feed(listing, fetch, llm, shell_reason)
         try:
-            advertised_next_urls(listing.document, listing.url)
+            next_links = advertised_next_urls(listing.document, listing.url)
         except NoPublicNextLink as exc:
             reason = f"{exc} and no usable public tender feed was found"
             return await _learn_public_feed(listing, fetch, llm, reason)
+        if not next_links and _advertised_total_count(listing.document):
+            return await _learn_public_feed(listing, fetch, llm, "the listing loads further results dynamically")
         preferred = discovery.get("detail_url")
         if not _observed_url(preferred, listing, origin):
-            preferred = next(iter(listing.links), None) if listing.url != entry.url else None
+            preferred = None
+            if listing.document is not None:
+                for row in listing.document.xpath("//tr[td[3] and td//a[@href]] | //article[.//header//a[@href]]")[:3]:
+                    targets = {_observed_url(href, listing, origin) for href in row.xpath(".//a/@href")}
+                    targets.discard(None)
+                    if len(targets) == 1:
+                        preferred = targets.pop()
+                        break
         detail = await detail_sample(listing, fetch, origin, preferred)
     except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:
         raise AttachFailed(str(exc)) from exc
 
     feedback: list[str] = []
     pagination_page = None
-    for strong in (False, False, True):
+    for strong in [False] * max(0, 3 - navigation_calls) + [True]:
         try:
             return await propose_html_recipe(
                 listing, detail, fetch, llm, strong=strong, feedback=feedback, pagination_page=pagination_page

@@ -137,6 +137,7 @@ def test_manual_refresh_tries_the_attach_again(monkeypatch) -> None:
     attempts = []
 
     async def failing_attach(url, fetch, llm):
+        assert db.portal_get(portal_id)["state"] == states.INTEGRATING
         attempts.append(url)
         raise AttachFailed("no usable tender listing found")
 
