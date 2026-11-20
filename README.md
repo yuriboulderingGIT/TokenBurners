@@ -5,12 +5,21 @@ Watchtower monitors public tender portals. Give it a listing address in the dash
 ## Run
 
 ```sh
-cp .env.example .env    # set OPENAI_API_KEY in the local copy
+test -f .env || cp .env.example .env
+# Edit .env and set OPENAI_API_KEY before starting the container.
 docker build -t watchtower .
 docker run -p 8080:8080 --env-file .env -v watchtower-data:/data watchtower
 ```
 
 Open <http://localhost:8080> for the dashboard or <http://localhost:8080/docs> for the API. The volume keeps SQLite, document bytes and the recipe-response cache across restarts. If reusing an older local `.env`, remove its `DATA_DIR=./data` line before running Docker.
+
+If a new portal reports “OpenAI client could not start”, check the key inside the container serving your dashboard. Find its name with `docker ps` and run the following check, replacing `watchtower-local` with that name. It prints only whether a value is configured.
+
+```sh
+docker exec watchtower-local python -c 'import os; print("Key configured" if os.getenv("OPENAI_API_KEY", "").strip() else "Key missing")'
+```
+
+If the key is missing, set it in your private `.env`, then recreate the container with `--env-file .env` and the same port and data volume. Docker reads the env file when it creates the container. Once it is running, open the failed portal and choose **Read again now**.
 
 A regular read runs the saved recipe in plain code. Watchtower spaces requests from each portal and to each destination host, including document downloads and redirects. It checks identifiers, field coverage, listing counts and document delivery. If a recipe breaks, the portal enters `healing` and continues to serve its last healthy snapshot. A successful repair restores delivery. Login and captcha gates produce `failed` with a reason.
 
