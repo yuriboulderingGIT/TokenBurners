@@ -307,3 +307,59 @@ def test_attach_verifies_21_pages_with_sparse_fields_and_footer_captcha():
             await fetcher.aclose()
 
     asyncio.run(exercise())
+
+
+def test_navigation_follows_observed_intermediate_and_preserves_notice_attributes():
+    menu = _LIST + "/menu"
+    listing = _LIST + "/avis"
+    urls = { _LIST: '<nav><a href="tenders/menu">Marchés publics</a></nav>',
+             menu: '<main><a href="avis">Avis en cours</a></main>',
+             listing: '<table><tr data-oid="FR-1"><td>École</td></tr></table>' }
+
+    class Navigator:
+        model_name = "fixture"
+
+        async def json(self, prompt, **kwargs):
+            data = json.loads(prompt)
+            if "entry" in data:
+                if data["entry"]["url"] == _LIST:
+                    return {"list_url": menu, "intermediate": True}
+                return {"list_url": listing}
+            assert 'data-oid="FR-1"' in data["list_page"]["sample_row"]
+            return {"list": {"url": listing, "item": "//tr"}, "fields": {"id": "@data-oid", "title": "./td"}}
+
+    async def check():
+        fetcher = FakeFetcher(urls)
+        try:
+            recipe = await learn_recipe(_LIST, fetcher.for_portal("test"), Navigator())
+            assert recipe.list_.url == listing
+        finally:
+            await fetcher.aclose()
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("label,finished", [("Pagina 2 di 2", True), ("2 / 2", True), ("Page 2 of 5", False)])
+def test_placeholder_only_ends_numbered_pager_on_last_page(label, finished):
+    from lxml import html
+    from brain.run_recipe import advertised_next_urls, NoPublicNextLink
+    doc = html.fromstring(f'<nav><a href="?page=1">1</a><a rel="next" href="#">»</a><span>{label}</span></nav>')
+    if finished:
+        assert not advertised_next_urls(doc, _LIST)
+    else:
+        with pytest.raises(NoPublicNextLink):
+            advertised_next_urls(doc, _LIST)
+
+
+def test_pagination_rejects_new_url_returning_identical_notice_rows():
+    async def exercise():
+        second = _LIST + "?page=2"
+        fetcher = FakeFetcher({_LIST: _LIST_HTML + '<a rel="next" href="?page=2">2</a>', second: _LIST_HTML})
+        recipe = Recipe.model_validate({"list": {"url": _LIST, "item": "//li", "next_page": "//a[@rel='next']/@href"},
+                                        "fields": {"id": "@data-id", "title": "./h2"}})
+        try:
+            with pytest.raises(RecipeReadError, match="repeated the same notice rows"):
+                await run_recipe(recipe, fetcher.for_portal("test"), max_tenders=1, verify_all_pages=True)
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())

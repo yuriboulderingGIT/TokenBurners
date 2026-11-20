@@ -91,3 +91,9 @@ docker run -p 8080:8080 --env-file .env -v watchtower-data:/data watchtower
 ```
 
 CI builds and starts the container on every pull request, so you don't need Docker locally.
+
+## Public search recipes
+
+An optional `list.search` object records a search endpoint observed during an anonymous visit, its request media type, and the numeric paging field when present. `list.url` remains the public listing that initiated the search. `html_path` locates HTML fragments inside a JSON envelope, and `total_path` locates an explicit result count. Both paths are arrays of literal keys. Existing HTML and JSON recipes continue to use GET.
+
+During a read, the browser revisits the listing and can scroll to trigger its public search. The reader reuses the observed search fields and that visit's cookies in memory, checks each result batch, and stops on a repeated batch, an incomplete count, or the 100-page limit. The saved recipe contains no request body, cookies or session tokens. Regular reads use no model.
