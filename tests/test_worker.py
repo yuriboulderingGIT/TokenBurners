@@ -10,3 +10,74 @@ def test_refresh_while_read_is_queued_returns_same_run_id() -> None:
     first = worker.request_read(portal_id)
     assert worker.request_read(portal_id) == first
     assert worker.queue.qsize() == 1
+
+
+# ----- retrying failed portals -----
+
+import asyncio  # noqa: E402
+
+from app import states  # noqa: E402
+from app.fetcher import FakeFetcher  # noqa: E402
+from app.models import Health, RawTender, Recipe, Tender  # noqa: E402
+
+RECIPE = Recipe.model_validate({"list": {"url": "https://portal.example/list", "item": "//tr"}})
+
+
+def _failed_portal(url: str) -> str:
+    portal_id = db.portal_create(url)
+    db.recipe_save(portal_id, RECIPE, "attach", 0.0)
+    states.set_state(db, portal_id, states.FAILED, "blocked: captcha")
+    return portal_id
+
+
+def _run_one(worker: Worker, portal_id: str) -> str:
+    run_id = worker.request_read(portal_id)
+    asyncio.run(worker._handle(*worker.queue.get_nowait()))
+    return run_id
+
+
+def _patch_read(monkeypatch, healthy: bool) -> None:
+    tender = Tender(id="T1", url="https://portal.example/t1", title="Roads", buyerName="City",
+                    publicationDate="2026-11-20", submissionDeadline=None, status="open")
+
+    async def fake_run_recipe(recipe, fetch):
+        return [RawTender(url=tender.url)]
+
+    async def no_repair(*args, **kwargs):
+        raise AssertionError("a retry must never call repair (model cost)")
+
+    monkeypatch.setattr("app.worker.run_recipe", fake_run_recipe)
+    monkeypatch.setattr("app.worker.normalize", lambda raw, locale: tender)
+    monkeypatch.setattr("app.worker.check_health", lambda prev, new: Health(ok=healthy, problems=[] if healthy else ["no tenders found"]))
+    monkeypatch.setattr("app.worker.repair", no_repair)
+
+
+def test_failed_portal_is_due_only_after_its_retry_interval() -> None:
+    worker = Worker(db, fetcher=None, llm=None)
+    portal_id = _failed_portal("https://portal.example/due-test")
+    assert worker._due(portal_id, 180)  # never read yet
+    run_id = db.run_create(portal_id, "read")
+    assert not worker._due(portal_id, 180)
+    db.execute("UPDATE runs SET started_at = '2000-01-01T00:00:00+00:00' WHERE id = ?", (run_id,))
+    assert worker._due(portal_id, 180)
+
+
+def test_retry_brings_a_recovered_portal_back_to_serving(monkeypatch) -> None:
+    _patch_read(monkeypatch, healthy=True)
+    worker = Worker(db, fetcher=FakeFetcher({}), llm=None)
+    portal_id = _failed_portal("https://portal.example/recovers")
+    run_id = _run_one(worker, portal_id)
+    assert db.portal_get(portal_id)["state"] == states.SERVING
+    assert db.one("SELECT result FROM runs WHERE id = ?", (run_id,))["result"] == "ok"
+
+
+def test_retry_that_still_fails_stays_failed_without_repair(monkeypatch) -> None:
+    _patch_read(monkeypatch, healthy=False)
+    worker = Worker(db, fetcher=FakeFetcher({}), llm=None)
+    portal_id = _failed_portal("https://portal.example/still-broken")
+    _run_one(worker, portal_id)
+    portal = db.portal_get(portal_id)
+    assert portal["state"] == states.FAILED
+    assert portal["reason"].startswith("still failing on retry")
+    assert not db.all("SELECT id FROM runs WHERE portal_id = ? AND kind = 'repair'", (portal_id,))
+    assert portal_id not in worker.active

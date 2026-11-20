@@ -40,6 +40,7 @@ request, goes through one rate limiter: at most 1 request per second per portal.
 | `OPENAI_MODEL_STRONG` | no | `gpt-5` | Strong model for repair |
 | `LLM_BUDGET_USD` | no | `5` | Total model budget; calls stop beyond it |
 | `REFRESH_MINUTES` | no | `15` | How often each portal is re-read |
+| `FAILED_RETRY_MINUTES` | no | `180` | How often a failed portal is retried (plain read, no repair) |
 | `WORKER_CONCURRENCY` | no | `4` | Portals read at the same time |
 | `MIN_REQUEST_INTERVAL` | no | `1.1` | Seconds between requests to one portal (rule: at least 1) |
 | `HTTP_TIMEOUT` | no | `30` | Seconds before one HTTP request gives up |

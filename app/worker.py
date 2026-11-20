@@ -23,7 +23,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app import states
-from app.config import REFRESH_MINUTES, WORKER_CONCURRENCY
+from app.config import FAILED_RETRY_MINUTES, REFRESH_MINUTES, WORKER_CONCURRENCY
 from app.db import DB
 from app.documents import store_documents
 from app.fetcher import Fetcher, PortalCancelled, PortalFetcher
@@ -86,29 +86,41 @@ class Worker:
     async def _scheduler(self) -> None:
         while True:
             await asyncio.sleep(30)
-            due_before = datetime.now(timezone.utc) - timedelta(minutes=REFRESH_MINUTES)
             for portal in self.db.portal_list():
-                if portal["state"] == states.FAILED:
-                    continue  # TODO(A1): retry failed portals now and then (e.g. every few hours)?
-                last = self.db.last_read_started(portal["id"])
-                if last is None or datetime.fromisoformat(last) < due_before:
+                minutes = FAILED_RETRY_MINUTES if portal["state"] == states.FAILED else REFRESH_MINUTES
+                if self._due(portal["id"], minutes):
                     self.request_read(portal["id"])
+
+    def _due(self, portal_id: str, minutes: float) -> bool:
+        last = self.db.last_read_started(portal_id)
+        due_before = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        return last is None or datetime.fromisoformat(last) < due_before
 
     async def _consume(self) -> None:
         while True:
             portal_id, run_id = await self.queue.get()
             try:
-                await self._read(portal_id, run_id, allow_repair=True)
-            except Exception as e:  # never let one portal kill the worker
-                log.exception("read %s crashed", run_id)
-                self.db.run_finish(run_id, "failed", f"internal error: {e}")
+                await self._handle(portal_id, run_id)
             finally:
-                self.active.pop(portal_id, None)
                 self.queue.task_done()
+
+    async def _handle(self, portal_id: str, run_id: str) -> None:
+        """One queued read. A failed portal gets a plain retry: no repair, so no model cost."""
+        try:
+            portal = self.db.portal_get(portal_id)
+            retry = portal is not None and portal["state"] == states.FAILED
+            if retry:
+                self.db.run_note(run_id, "retry of a failed portal: plain read, no repair")
+            await self._read(portal_id, run_id, allow_repair=not retry, retry=retry)
+        except Exception as e:  # never let one portal kill the worker
+            log.exception("read %s crashed", run_id)
+            self.db.run_finish(run_id, "failed", f"internal error: {e}")
+        finally:
+            self.active.pop(portal_id, None)
 
     # ----- pipeline -----
 
-    async def _read(self, portal_id: str, run_id: str, allow_repair: bool) -> None:
+    async def _read(self, portal_id: str, run_id: str, allow_repair: bool, retry: bool = False) -> None:
         portal = self.db.portal_get(portal_id)
         if portal is None:
             self.db.run_finish(run_id, "failed", "portal was deleted")
@@ -139,6 +151,8 @@ class Worker:
             self.db.run_finish(run_id, "failed", f"health check failed: {problems}", cost)
             if allow_repair:
                 await self._repair(portal_id, recipe, health, fetch)
+            elif retry:
+                states.set_state(self.db, portal_id, states.FAILED, f"still failing on retry: {problems}")
             else:
                 states.set_state(self.db, portal_id, states.FAILED, f"repaired recipe still fails: {problems}")
 
@@ -206,6 +220,9 @@ class Worker:
             return
         if portal["state"] == states.INTEGRATING:
             states.set_state(self.db, portal_id, states.FAILED, reason, run_id)
+        elif portal["state"] == states.FAILED:
+            self.db.portal_update(portal_id, reason=f"still failing on retry: {reason}")
+            self.db.run_note(run_id, reason)
         else:
             # Keep the state, but the reason must say the latest data may be stale.
             self.db.portal_update(portal_id, reason=f"{reason} (serving last good tenders)")
