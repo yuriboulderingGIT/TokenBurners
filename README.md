@@ -14,6 +14,15 @@ Open <http://localhost:8080> for the dashboard or <http://localhost:8080/docs> f
 
 A regular read runs the saved recipe in plain code. Watchtower spaces requests from each portal and to each destination host, including document downloads and redirects. It checks identifiers, field coverage, listing counts and document delivery. If a recipe breaks, the portal enters `healing` and continues to serve its last healthy snapshot. A successful repair restores delivery. Login and captcha gates produce `failed` with a reason.
 
+## Find a tender website to try
+
+For a first test, open the Masaryk University listing in a private browser window. Pick a notice and note its title and reference. Paste the **listing URL** into Watchtower. Once it says `serving`, open a tender in the dashboard and compare it with the original notice. Our local run served 15 notices from Masaryk and 10 from Cyprus. [Masaryk University procurement](https://zakazky.muni.cz/) · [Cyprus latest calls for tenders](https://www.eprocurement.gov.cy/epps/quickSearchAction.do?searchType=cftFTS&latest=true)
+
+1. Search for a buyer and its current opportunities. Try `university procurement "current tenders"`, `site:.cz "veřejné zakázky" univerzita`, or `commune "marchés en cours"`. For an EU notice, follow the buyer profile or procurement documents link on TED to find the original portal. [Tenders Electronic Daily](https://ted.europa.eu/)
+2. On the buyer’s site, follow **Open tenders**, **Contract notices**, or the local equivalent until you see several named opportunities. Copy that results page’s address, including its query string. Check that reopening the address in a private window reproduces the list and that a notice opens without signing in.
+3. Look for a reference number and title on individual notices. If there are multiple pages, check whether **Next** has a link you can copy and reopen. A small buyer listing with public detail links is easier to verify than a national search with hundreds of pages. Watchtower checks up to 100 pages.
+4. Paste the listing address into the dashboard. If the read fails, open the portal’s history. HTTP 403 means the site refused Watchtower’s request. A CAPTCHA requires human interaction. For either outcome, look for another public listing published by the buyer. JavaScript listings need an anonymous JSON feed Watchtower can read. An OpenAI client startup error points to the running container’s key configuration and can affect any new portal.
+
 ## Settings
 
 | Environment variable | Default | Use |

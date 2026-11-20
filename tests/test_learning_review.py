@@ -9,7 +9,7 @@ import pytest
 
 from app.fetcher import FakeFetcher, Fetcher
 from app.models import Recipe
-from brain.blocks import detect_block
+from brain.blocks import Blocked, detect_block
 from brain.learn import AttachFailed, RecipeValidationError, learn_recipe, read_page_sample, validate_candidate
 from brain.run_recipe import MAX_PAGES, RecipeReadError, portal_origin, run_recipe
 
@@ -24,6 +24,89 @@ _LIST_HTML = """
 
 _CAPTCHA = '<form><div class="g-recaptcha"></div><button>Continue</button></form>'
 _LOGIN = '<form><input type="password"><button>Continue</button></form>'
+_IMAGE_GATE = """This question is for testing whether you are a human visitor.
+<b>What code is in the image?</b><input type="text" id="ans" name = "answer">"""
+_SCRIPT_SHELL = """<html><head><script type="module" src="/app.js"></script></head>
+<body><noscript>Enable JavaScript.</noscript><div id="app"></div></body></html>"""
+
+
+def test_image_challenge_on_next_page_stops_the_read():
+    recipe = Recipe.model_validate({
+        "list": {"url": _LIST, "item": "//li", "next_page": "//a[@rel='next']/@href"}
+    })
+
+    async def exercise():
+        pages = {_LIST: _LIST_HTML + '<a rel="next" href="?page=2">Next</a>', _LIST + "?page=2": _IMAGE_GATE}
+        fetcher = FakeFetcher(pages)
+        try:
+            with pytest.raises(Blocked, match="captcha"):
+                await run_recipe(recipe, fetcher.for_portal("fixture"))
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
+    assert detect_block(_IMAGE_GATE, 200, content_available=True) is None
+    assert detect_block('<input name="answer">What code is in the image?', 200) is None
+
+
+@pytest.mark.parametrize("has_feed", [True, False])
+def test_script_shell_checks_feed_without_requesting_html_selectors(monkeypatch, has_feed):
+    feed = _LIST + ".json"
+
+    class FeedLLM:
+        model_name = "fixture"
+
+        async def json(self, prompt, **kwargs):
+            assert "endpoints" in json.loads(prompt)
+            return {"endpoint": 0, "recipe": {"list": {"item": "$.items[*]"},
+                                              "fields": {"id": "$.id", "title": "$.title"}}}
+
+    async def capture(url, fetch):
+        assert url == _LIST
+        return [(feed, payload)] if has_feed else []
+
+    payload = {"items": [{"id": "REF-1", "title": "School repairs"}]}
+    monkeypatch.setattr("brain.js_discover._capture_json", capture)
+
+    async def exercise():
+        fetcher = FakeFetcher({_LIST: _SCRIPT_SHELL, feed: json.dumps(payload)})
+        try:
+            attach = learn_recipe(_LIST, fetcher.for_portal("fixture"), FeedLLM())
+            if has_feed:
+                assert (await attach).list_.url == feed
+            else:
+                with pytest.raises(AttachFailed, match="requires JavaScript"):
+                    await attach
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_landing_links_to_listing_with_script_only_next_control(monkeypatch):
+    listing = _LIST + "/open"
+    control = """<a href="javascript:;"><span title="Aller à la page suivante"><i></i></span></a>"""
+
+    class Locator:
+        async def json(self, prompt, **kwargs):
+            assert "entry" in json.loads(prompt)
+            return {"list_url": listing}
+
+    async def capture(url, fetch):
+        assert url == listing
+        return []
+
+    monkeypatch.setattr("brain.js_discover._capture_json", capture)
+
+    async def exercise():
+        fetcher = FakeFetcher({_LIST: f'<a href="{listing}">Marchés en cours</a>', listing: _LIST_HTML + control})
+        try:
+            with pytest.raises(AttachFailed, match="next page control provides no public HTTP link"):
+                await learn_recipe(_LIST, fetcher.for_portal("fixture"), Locator())
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("total", [1, 500])
@@ -115,7 +198,7 @@ def test_attach_rejects_unsafe_redirect_before_request(destination):
 
 
 @pytest.mark.parametrize(("markup", "kind"), [
-    (_CAPTCHA, "captcha"), (_LOGIN, "login"), ('<input type="password">', "login"),
+    (_CAPTCHA, "captcha"), (_IMAGE_GATE, "captcha"), (_LOGIN, "login"), ('<input type="password">', "login"),
 ])
 def test_standalone_form_gate_is_detected_without_a_heading(markup, kind):
     assert detect_block(markup, 200) == kind

@@ -17,7 +17,8 @@ from brain.blocks import Blocked, detect_block
 from brain.llm import ScopedLLM
 from brain.normalize import normalize
 from brain.run_recipe import (
-    MAX_PAGES, Origin, PaginationError, RecipeReadError, fetch_page, is_json_response, portal_origin,
+    MAX_PAGES, NoPublicNextLink, Origin, PaginationError, RecipeReadError, advertised_next_urls,
+    fetch_page, is_json_response, portal_origin,
     resolve_portal_url, run_recipe,
 )
 from brain.shrink import shrink
@@ -264,6 +265,29 @@ async def propose_html_recipe(
     return candidate
 
 
+def _script_shell(page: PageSample) -> bool:
+    doc = page.document
+    if doc is None or page.links or not doc.xpath("//script") or not doc.xpath("//body"):
+        return False
+    visible_text = doc.xpath(
+        "//body//text()[normalize-space() and not(ancestor::noscript or ancestor::script "
+        "or ancestor::style or ancestor::template)]"
+    )
+    return not visible_text
+
+
+async def _learn_public_feed(listing: PageSample, fetch: PortalFetcher, llm: ScopedLLM, reason: str) -> Recipe:
+    from brain.js_discover import discover_json_api
+
+    candidate = await discover_json_api(listing.url, fetch, llm)
+    if candidate is None:
+        raise RecipeValidationError(reason)
+    if portal_origin(candidate.list_.url) != portal_origin(listing.url):
+        raise RecipeValidationError("discovered JSON URL belongs to another portal")
+    await validate_candidate(candidate, fetch)
+    return candidate
+
+
 async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe:
     from brain.js_discover import discover_json_api
 
@@ -282,6 +306,9 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
             await validate_candidate(candidate, fetch)
             return candidate
         entry = _page_sample(response, origin, requested_url=clean_url)
+        shell_reason = "the listing requires JavaScript and no usable public tender feed was found"
+        if _script_shell(entry):
+            return await _learn_public_feed(entry, fetch, llm, shell_reason)
         discovery = await llm.json(
             json.dumps({
                 "task": (
@@ -300,6 +327,13 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
         if list_url is None:
             raise RecipeValidationError("listing URL was not observed on the portal")
         listing = entry if list_url == entry.url else await read_page_sample(list_url, fetch, origin)
+        if listing is not entry and _script_shell(listing):
+            return await _learn_public_feed(listing, fetch, llm, shell_reason)
+        try:
+            advertised_next_urls(listing.document, listing.url)
+        except NoPublicNextLink as exc:
+            reason = f"{exc} and no usable public tender feed was found"
+            return await _learn_public_feed(listing, fetch, llm, reason)
         preferred = discovery.get("detail_url")
         if not _observed_url(preferred, listing, origin):
             preferred = next(iter(listing.links), None) if listing.url != entry.url else None
@@ -319,12 +353,6 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
             if isinstance(exc, PaginationError) and exc.page_sample:
                 pagination_page = exc.page_sample
     try:
-        candidate = await discover_json_api(listing.url, fetch, llm)
-        if candidate is not None:
-            if portal_origin(candidate.list_.url) != origin:
-                raise RecipeValidationError("discovered JSON URL belongs to another portal")
-            await validate_candidate(candidate, fetch)
-            return candidate
+        return await _learn_public_feed(listing, fetch, llm, feedback[0])
     except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:
-        feedback = [str(exc)]
-    raise AttachFailed(feedback[0] if feedback else "no usable tender listing found")
+        raise AttachFailed(str(exc)) from exc
