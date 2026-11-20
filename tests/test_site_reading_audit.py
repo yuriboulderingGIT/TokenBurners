@@ -8,7 +8,7 @@ import pytest
 from app.db import DB
 from app.fetcher import FakeFetcher, Fetcher, PortalCancelled, RunPageCache
 from app.health import check_health
-from app.models import ReadResult, Recipe
+from app.models import RawTender, ReadResult, Recipe
 from app.worker import Worker
 from brain import js_discover
 from brain.learn import validate_candidate
@@ -238,3 +238,12 @@ def test_attach_run_first_read_reuses_validated_pages(tmp_path, monkeypatch):
         finally:
             await client.aclose()
     asyncio.run(exercise())
+
+
+def test_notice_repeated_on_overlapping_list_pages_is_healthy():
+    # Seen on vergabe.autobahn.de: a list-only notice shifts from page Start=50 to Start=100.
+    def tender(n, page):
+        return normalize(RawTender(url=f'{BASE}/list?Start={page}', fields={'id': str(n), 'title': f'Contract {n}'}), Recipe.model_validate(
+            {'list': {'url': BASE, 'item': '//tr'}}).locale)
+    tenders = [tender(n, 50) for n in range(1, 11)] + [tender(10, 100)]
+    assert check_health(None, ReadResult(tenders=tenders, raw_count=len(tenders))).ok

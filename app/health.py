@@ -83,9 +83,11 @@ def _identity_problems(new: ReadResult) -> list[str]:
     if new.raw_count and len(tenders) < MIN_ID_RATE * new.raw_count:
         problems.append(f"only {len(tenders)} of {new.raw_count} list entries had a readable tender id")
     # One id on two different notices: storage would silently drop one. A notice repeated
-    # unchanged (overlapping pages) is the same tender and stored once.
-    first: dict[str, Tender] = {}
-    conflicts = sorted({t.id for t in tenders if first.setdefault(t.id, t) != t})
+    # unchanged on overlapping pages is the same tender and stored once; its url may differ,
+    # because list-only recipes use the listing page it was seen on.
+    first: dict[str, dict] = {}
+    conflicts = sorted({t.id for t in tenders
+                        if first.setdefault(t.id, (data := t.model_dump(exclude={"url"}))) != data})
     if conflicts:
         problems.append(f"{len(conflicts)} tender ids belong to different notices (for example {conflicts[0]!r}), "
                         "so fields.id is not a unique notice id")
