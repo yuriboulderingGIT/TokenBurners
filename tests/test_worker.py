@@ -52,6 +52,23 @@ def _patch_read(monkeypatch, healthy: bool) -> None:
     monkeypatch.setattr("app.worker.repair", no_repair)
 
 
+def test_first_read_reports_progress_before_publishing(monkeypatch) -> None:
+    worker = Worker(db, fetcher=FakeFetcher({}), llm=None)
+    portal_id = db.portal_create("https://portal.example/first-read-progress")
+    db.recipe_save(portal_id, RECIPE, "attach", 0.0)
+    during_read = []
+
+    async def observe(recipe, fetch):
+        portal = db.portal_get(portal_id)
+        during_read.append((portal["state"], portal["reason"], portal["tender_count"]))
+        return []
+
+    _patch_read(monkeypatch, healthy=True)
+    monkeypatch.setattr("app.worker.run_recipe", observe)
+    _run_one(worker, portal_id)
+    assert during_read == [(states.INTEGRATING, "recipe ready, reading tenders and documents for the first time", 0)]
+
+
 def test_failed_portal_is_due_only_after_its_retry_interval() -> None:
     worker = Worker(db, fetcher=None, llm=None)
     portal_id = _failed_portal("https://portal.example/due-test")
