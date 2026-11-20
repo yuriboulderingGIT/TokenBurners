@@ -12,6 +12,7 @@ from app.db import DB
 from app.fetcher import Fetcher
 from app.models import Recipe
 from app.worker import Worker
+from brain.blocks import Blocked
 from mock_portal import server
 
 PORTAL_URL = "http://portal.example/tenders"
@@ -30,10 +31,19 @@ def portal(tmp_path, monkeypatch):
     return db, portal_id
 
 
-def _read_once(db: DB, portal_id: str) -> None:
+class _NoModel:
+    """Stands in for the LLM where a test replaces repair() itself."""
+
+    total_cost = 0.0
+
+    def scoped(self, *_args):
+        return self
+
+
+def _read_once(db: DB, portal_id: str, llm=None) -> None:
     async def run():
         fetcher = Fetcher(min_interval=0, retries=0, transport=httpx.ASGITransport(app=server.app))
-        worker = Worker(db, fetcher, llm=None)  # healthy reads and blocks never call the model
+        worker = Worker(db, fetcher, llm=llm)  # healthy reads and blocks never call the model
         try:
             await worker.start()
             worker.request_read(portal_id)
@@ -85,6 +95,25 @@ def test_file_over_the_cap_is_left_out_and_the_portal_still_serves(portal, monke
     assert db.portal_get(portal_id)["state"] == "serving"
     big = next(t for t in db.tenders_for(portal_id) if t["id"] == server.BIG_TENDER)
     assert [d["fileName"] for d in big["documents"]] == ["tender-documents.pdf"]
+
+
+def test_block_met_during_repair_reports_blocked_and_finishes_the_repair_run(portal, monkeypatch) -> None:
+    db, portal_id = portal
+    _read_once(db, portal_id)
+    assert db.portal_get(portal_id)["state"] == "serving"
+
+    async def blocked_repair(*_args, **_kwargs):
+        raise Blocked("captcha")
+
+    monkeypatch.setattr("app.worker.repair", blocked_repair)
+    server.STATE["layout"] = "v2"  # recipe v1 finds nothing -> health fails -> repair
+    _read_once(db, portal_id, llm=_NoModel())
+    row = db.portal_get(portal_id)
+    assert row["state"] == "failed"
+    assert row["reason"] == "blocked: captcha required"
+    [repair_run] = [r for r in db.runs_for(portal_id) if r["kind"] == "repair"]
+    assert repair_run["result"] == "failed" and repair_run["finished_at"]
+    assert len(db.tenders_for(portal_id)) == 5  # the last good tenders are kept
 
 
 def test_captcha_portal_fails_with_a_reason(portal) -> None:

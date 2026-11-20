@@ -81,3 +81,71 @@ def test_retry_that_still_fails_stays_failed_without_repair(monkeypatch) -> None
     assert portal["reason"].startswith("still failing on retry")
     assert not db.all("SELECT id FROM runs WHERE portal_id = ? AND kind = 'repair'", (portal_id,))
     assert portal_id not in worker.active
+
+
+# ----- repair path -----
+
+def _serving_portal(url: str) -> str:
+    portal_id = db.portal_create(url)
+    db.recipe_save(portal_id, RECIPE, "attach", 0.0)
+    states.set_state(db, portal_id, states.SERVING, "delivering 1 tenders")
+    return portal_id
+
+
+def _kind(run_id: str) -> str:
+    return db.one("SELECT kind FROM runs WHERE id = ?", (run_id,))["kind"]
+
+
+def test_refresh_during_repair_and_reread_returns_the_live_run(monkeypatch) -> None:
+    worker = Worker(db, fetcher=FakeFetcher({}), llm=type("L", (), {"scoped": lambda *a: type("S", (), {"total_cost": 0.0})()})())
+    portal_id = _serving_portal("https://portal.example/repair-live-run")
+    seen: list[str] = []
+    calls = 0
+
+    async def fake_run_recipe(recipe, fetch):
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # the re-read after the repair
+            seen.append(worker.request_read(portal_id))
+            raise RuntimeError("connection reset")  # not a recipe problem
+        return []
+
+    async def fake_repair(*args, **kwargs):
+        seen.append(worker.request_read(portal_id))
+        return RECIPE
+
+    monkeypatch.setattr("app.worker.run_recipe", fake_run_recipe)
+    monkeypatch.setattr("app.worker.check_health", lambda prev, new: Health(ok=False, problems=["no tenders found"]))
+    monkeypatch.setattr("app.worker.repair", fake_repair)
+    first = _run_one(worker, portal_id)
+
+    assert [_kind(r) for r in seen] == ["repair", "read"]
+    assert first not in seen
+    # A crash in the re-read must not leave the portal stuck in healing.
+    portal = db.portal_get(portal_id)
+    assert portal["state"] == states.FAILED
+    assert portal["reason"].startswith("re-read after repair failed")
+    assert portal_id not in worker.active
+    assert worker.queue.qsize() == 0  # refreshes during the run queued nothing extra
+
+
+def test_repair_that_crashes_ends_failed_not_healing(monkeypatch) -> None:
+    worker = Worker(db, fetcher=FakeFetcher({}), llm=type("L", (), {"scoped": lambda *a: type("S", (), {"total_cost": 0.0})()})())
+    portal_id = _serving_portal("https://portal.example/repair-crash")
+
+    async def fake_run_recipe(recipe, fetch):
+        return []
+
+    async def crashing_repair(*args, **kwargs):
+        raise ValueError("model answered nonsense")
+
+    monkeypatch.setattr("app.worker.run_recipe", fake_run_recipe)
+    monkeypatch.setattr("app.worker.check_health", lambda prev, new: Health(ok=False, problems=["no tenders found"]))
+    monkeypatch.setattr("app.worker.repair", crashing_repair)
+    _run_one(worker, portal_id)
+
+    portal = db.portal_get(portal_id)
+    assert portal["state"] == states.FAILED
+    assert portal["reason"].startswith("repair crashed")
+    repair_run = db.one("SELECT result, finished_at FROM runs WHERE portal_id = ? AND kind = 'repair'", (portal_id,))
+    assert repair_run["result"] == "failed" and repair_run["finished_at"]

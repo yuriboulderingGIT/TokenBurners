@@ -206,6 +206,7 @@ class Worker:
     ) -> None:
         problems = "; ".join(health.problems)
         repair_run = self.db.run_create(portal_id, "repair")
+        self.active[portal_id] = repair_run  # a refresh now returns the run that is still going
         states.set_state(self.db, portal_id, states.HEALING, f"repairing after: {problems}", repair_run)
         llm = self.llm.scoped(portal_id, repair_run, "repair")
         try:
@@ -215,17 +216,16 @@ class Worker:
             states.set_state(self.db, portal_id, states.FAILED, f"repair impossible, model unavailable: {e}")
             return
         except Blocked:
-            # _read turns this into failed + reason; the repair run must not stay "running".
+            # _read turns this into failed + "blocked: ..."; the repair run must not stay "running".
             self.db.run_finish(repair_run, "failed", "stopped: the portal now asks for a login or captcha", llm.total_cost)
             raise
         except PortalCancelled:
-            self.db.run_finish(repair_run, "failed", "stopped: portal was deleted", llm.total_cost)
-            raise
-        except Exception as e:
-            # Never leave a portal in "healing" forever.
-            log.exception("repair for %s crashed", portal_id)
-            self.db.run_finish(repair_run, "failed", f"repair crashed: {type(e).__name__}: {e}", llm.total_cost)
-            states.set_state(self.db, portal_id, states.FAILED, f"repair crashed ({type(e).__name__}) after: {problems}")
+            self.db.run_finish(repair_run, "failed", "portal was deleted", llm.total_cost)
+            return
+        except Exception as e:  # a crash in repair must not leave the portal in healing
+            log.exception("repair %s crashed", repair_run)
+            self.db.run_finish(repair_run, "failed", f"repair crashed: {e}", llm.total_cost)
+            states.set_state(self.db, portal_id, states.FAILED, f"repair crashed: {type(e).__name__}: {e}")
             return
         if new_recipe is None:
             self.db.run_finish(repair_run, "failed", "repair gave up", llm.total_cost)
@@ -234,6 +234,7 @@ class Worker:
         version = self.db.recipe_save(portal_id, new_recipe, "repair", llm.total_cost)
         self.db.run_finish(repair_run, "ok", f"recipe v{version} written", llm.total_cost)
         reread = self.db.run_create(portal_id, "read")
+        self.active[portal_id] = reread
         await self._read(portal_id, reread, allow_repair=False)
 
     def _previous(self, portal_id: str) -> ReadResult | None:
@@ -250,6 +251,10 @@ class Worker:
             return
         if portal["state"] == states.INTEGRATING:
             states.set_state(self.db, portal_id, states.FAILED, reason, run_id)
+        elif portal["state"] == states.HEALING:
+            # The re-read after a repair crashed: the new recipe is unproven. The failed-retry
+            # timer tries it again later with a plain read.
+            states.set_state(self.db, portal_id, states.FAILED, f"re-read after repair failed: {reason}", run_id)
         elif portal["state"] == states.FAILED:
             self.db.portal_update(portal_id, reason=f"still failing on retry: {reason}")
             self.db.run_note(run_id, reason)
