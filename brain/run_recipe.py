@@ -64,6 +64,10 @@ class PaginationError(RecipeReadError):
         )
 
 
+class MissedNextPage(PaginationError):
+    """The recipe missed a next link that the listing itself advertises."""
+
+
 async def run_recipe(
     recipe: Recipe, fetch: PortalFetcher, *, max_tenders: int | None = None,
     verify_all_pages: bool = False,
@@ -124,7 +128,7 @@ async def run_recipe(
         except RecipeReadError as exc:
             raise PaginationError(str(exc), sample_page) from exc
         if advertised and following not in advertised:
-            raise PaginationError(
+            raise MissedNextPage(
                 f"list.next_page missed the advertised next page on page {page_number}", sample_page
             )
         if following is None and observed_count < advertised_count:

@@ -17,7 +17,7 @@ from brain.blocks import Blocked, detect_block
 from brain.llm import ScopedLLM
 from brain.normalize import normalize
 from brain.run_recipe import (
-    MAX_PAGES, NoPublicNextLink, Origin, PaginationError, RecipeReadError, advertised_next_urls,
+    MAX_PAGES, MissedNextPage, NoPublicNextLink, Origin, PaginationError, RecipeReadError, advertised_next_urls,
     fetch_page, is_json_response, portal_origin,
     resolve_portal_url, run_recipe,
 )
@@ -25,6 +25,14 @@ from brain.shrink import shrink
 
 _SAMPLE_SIZE = 3
 _MAX_LINKS = 60
+_ALL_LISTINGS_LABELS = {"view all tenders", "view all notices", "view all opportunities"}
+_LABELLED_NEXT = (
+    "//a[@href and (@rel='next' or "
+    "translate(normalize-space(@aria-label), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+    "'abcdefghijklmnopqrstuvwxyz')='next page') and not(ancestor-or-self::*"
+    "[@disabled or @hidden or @aria-disabled='true' or @aria-hidden='true' or "
+    "contains(concat(' ', normalize-space(@class), ' '), ' disabled ')])]/@href"
+)
 _HTML_SOURCE_VALUES = "descendant-or-self::*/@* | .//text()"
 _FILES = (".pdf", ".zip", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".odt", ".rar")
 _SYSTEM = (
@@ -41,6 +49,10 @@ class AttachFailed(Exception):
 
 class RecipeValidationError(ValueError):
     """A proposed recipe did not match enough real tender data."""
+
+
+class InvalidListingSample(RecipeValidationError):
+    """The sampled listing lacks identifiable notices."""
 
 
 def _unique_ids(pairs: Iterable[tuple[str | None, str]]) -> dict[str, str]:
@@ -171,10 +183,10 @@ async def validate_candidate(
         sample_recipe = recipe.model_copy(update={"fields": {**recipe.fields, "_source_values": source_values}})
     rows = await run_recipe(sample_recipe, fetch, max_tenders=_SAMPLE_SIZE, verify_all_pages=True)
     if not rows:
-        raise RecipeValidationError("the list selector found no tenders")
+        raise InvalidListingSample("the list selector found no tenders")
     tenders = [tender for row in rows if (tender := normalize(row, recipe.locale)) is not None]
     if len(tenders) != len(rows) or any(not tender.title for tender in tenders):
-        raise RecipeValidationError("sample tenders need a portal-issued ID and a title")
+        raise InvalidListingSample("sample tenders need a portal-issued ID and a title")
     if len({tender.id for tender in tenders}) != len(tenders):
         raise RecipeValidationError("sample tender IDs are not distinct")
     if stored_ids:
@@ -253,13 +265,24 @@ async def propose_html_recipe(
                 "Use the current list page to select current tenders."
             )
     proposal = await llm.json(json.dumps(prompt, ensure_ascii=False), system=_SYSTEM, strong=strong)
+    if isinstance(proposal, dict) and isinstance(proposal.get("fields"), dict):
+        # An omitted field has no selector. Some models spell that omission as JSON null.
+        proposal = {**proposal, "fields": {k: v for k, v in proposal["fields"].items() if v is not None}}
     try:
         candidate = Recipe.model_validate(proposal)
     except ValidationError as exc:
         raise RecipeValidationError("the proposal does not match the recipe schema") from exc
     if candidate.kind != "html" or candidate.list_.url != listing.url:
         raise RecipeValidationError("the recipe must use the supplied HTML list URL")
-    await validate_candidate(candidate, fetch, expected_document_ids=expected_document_ids, stored_ids=stored_ids)
+    try:
+        await validate_candidate(candidate, fetch, expected_document_ids=expected_document_ids, stored_ids=stored_ids)
+    except MissedNextPage:
+        # Prefer the model's selector when it works. A labelled link can recover a
+        # missed pager even when repeated rows pushed it outside the model's excerpt.
+        if listing.document is None or not listing.document.xpath(_LABELLED_NEXT):
+            raise
+        candidate.list_.next_page = _LABELLED_NEXT
+        await validate_candidate(candidate, fetch, expected_document_ids=expected_document_ids, stored_ids=stored_ids)
     candidate.learned_by = llm.strong_model_name if strong else llm.model_name
     candidate.learned_at = now_iso()
     return candidate
@@ -315,6 +338,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                     "Identify the public tender listing and one example tender detail page. "
                     "Return list_url equal to the entry URL or an observed link; use the "
                     "entry URL if it already lists tenders or loads them with JavaScript. "
+                    "On a market overview with featured tenders, prefer the link to the full tender listing. "
                     "Return detail_url only if it is an observed link to a tender; otherwise null."
                 ),
                 "entry": entry.evidence(),
@@ -352,6 +376,17 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
             feedback = [str(exc)]
             if isinstance(exc, PaginationError) and exc.page_sample:
                 pagination_page = exc.page_sample
+            if isinstance(exc, InvalidListingSample) and listing is entry and not strong:
+                targets = [url for url, label in entry.links.items()
+                           if url != entry.url and label.casefold() in _ALL_LISTINGS_LABELS]
+                if len(targets) == 1:
+                    try:
+                        listing = await read_page_sample(targets[0], fetch, origin)
+                        detail = await detail_sample(listing, fetch, origin, preferred)
+                    except (RecipeReadError, httpx.HTTPError) as error:
+                        raise AttachFailed(str(error)) from error
+                    feedback = []
+                    pagination_page = None
     try:
         return await _learn_public_feed(listing, fetch, llm, feedback[0])
     except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:

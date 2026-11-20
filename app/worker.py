@@ -159,6 +159,10 @@ class Worker:
                 version = self.db.recipe_save(portal_id, recipe, "attach", llm.total_cost)
                 self.db.run_note(run_id, f"recipe v{version} learned by {recipe.learned_by} (${llm.total_cost:.4f})")
 
+            if portal["state"] == states.INTEGRATING or portal["recipe_version"] is None:
+                states.set_state(self.db, portal_id, states.INTEGRATING,
+                                 "recipe ready, reading tenders and documents for the first time", run_id)
+
             pagination_page = None
             try:
                 result = await self._execute(portal_id, recipe, fetch)
