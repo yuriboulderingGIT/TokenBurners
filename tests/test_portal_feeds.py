@@ -112,7 +112,8 @@ def test_listing_widget_from_a_cdn_reveals_the_portal_feed(monkeypatch):
         fetcher = FixtureFetcher({
             f"{base}/list": '<list-widget></list-widget><script src="https://cdn.example/widget.js"></script>',
             # Like the real widget, it loads a large settings file before its list.
-            "https://cdn.example/widget.js": "fetch('https://cdn.example/api/x'); fetch('/api/translations')"
+            # Single-page app bundles can exceed 4 MB.
+            "https://cdn.example/widget.js": " " * 4_500_000 + "fetch('https://cdn.example/api/x'); fetch('/api/translations')"
                                              ".then(r => r.json()).then(() => fetch('/api/tenders?offset=0'));",
             f"{base}/api/translations": json.dumps({"sha": "1", "translations": "x" * 600_000}),
             f"{base}/api/tenders?offset=0": json.dumps({"tenders": [{"id": "1", "title": "Gara"}]}),

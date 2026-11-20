@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 _MAX_REQUESTS = 140
 _MAX_ENDPOINTS = 4
 _MAX_RESPONSE_BYTES = 512_000
-_MAX_SCRIPT_BYTES = 4 * 1024 * 1024
+_MAX_SCRIPT_BYTES = 8 * 1024 * 1024  # single-page app bundles exceed 4 MB
 # A chunked application may need the whole request budget at one request per second.
 _PAGE_LOAD_SECONDS = 170
 _JSON_WAIT_SECONDS = 18
