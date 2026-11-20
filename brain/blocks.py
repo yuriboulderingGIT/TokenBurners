@@ -17,13 +17,16 @@ _CAPTCHA_WIDGET = re.compile(
     re.I,
 )
 _CHALLENGE_HEADING = re.compile(
-    r"<(?:title|h1)\b[^>]*>[^<]*(?:captcha|not a robot|verify you are human|just a moment)",
+    r"<(?:title|h[12])\b[^>]*>[^<]*(?:captcha|not a robot|verify (?:that )?you are human|just a moment)",
     re.I,
 )
 _LOGIN_HEADING = re.compile(
-    r"<(?:title|h1)\b[^>]*>[^<]*(?:sign[ -]?in|log[ -]?in|anmeld(?:en|ung)|connexion)",
+    r"<(?:title|h[12])\b[^>]*>[^<]*(?:sign[ -]?in|log[ -]?in|anmeld(?:en|ung)|connexion)",
     re.I,
 )
+_ANCILLARY = re.compile(r"<(header|nav|aside|footer)\b[^>]*>.*?</\1\s*>", re.I | re.S)
+_FORM = re.compile(r"<form\b[^>]*>.*?</form\s*>", re.I | re.S)
+_PUBLIC_CONTENT = re.compile(r"<(?:a\b[^>]*\bhref\s*=|article\b|tr\b)", re.I)
 
 
 def detect_block(html: str, status: int, *, content_available: bool = False) -> str | None:
@@ -34,11 +37,18 @@ def detect_block(html: str, status: int, *, content_available: bool = False) -> 
         return None
 
     body = html[:256_000]
-    short_page = len(body) < 8_000 and len(re.findall(r"<a\b", body, flags=re.I)) < 3
-    if _CAPTCHA_WIDGET.search(body) and (status >= 400 or short_page or _CHALLENGE_HEADING.search(body)):
+    short_gate = False
+    if status < 400:
+        body = _ANCILLARY.sub("", body)
+        short_gate = (
+            len(body) < 8_000
+            and _PUBLIC_CONTENT.search(_FORM.sub("", body)) is None
+        )
+    challenge_heading = _CHALLENGE_HEADING.search(body)
+    if _CAPTCHA_WIDGET.search(body) and (status >= 400 or challenge_heading or short_gate):
         return "captcha"
-    if _CHALLENGE_HEADING.search(body) and "/cdn-cgi/challenge-platform/" in body:
+    if challenge_heading and "/cdn-cgi/challenge-platform/" in body:
         return "captcha"
-    if _PASSWORD.search(body) and (status >= 400 or short_page or _LOGIN_HEADING.search(body)):
+    if _PASSWORD.search(body) and (status >= 400 or _LOGIN_HEADING.search(body) or short_gate):
         return "login"
     return None

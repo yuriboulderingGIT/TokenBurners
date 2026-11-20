@@ -155,8 +155,10 @@ class ReadResult(BaseModel):
     raw_count: int = 0  # how many list entries the recipe found
     documents_tried: int = 0
     documents_failed: int = 0
+    tender_ids_with_document_links: set[str] | None = None  # observed before downloading or size checks
 
 
 class Health(BaseModel):
     ok: bool
     problems: list[str] = Field(default_factory=list)
+    missing_document_ids: set[str] = Field(default_factory=set)  # verify these tenders during repair

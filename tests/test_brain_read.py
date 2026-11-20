@@ -18,11 +18,15 @@ _MOCK_RECIPE = Path(__file__).parents[1] / "testset/fixtures/mock/recipe_v1.json
 
 
 async def _read(
-    recipe: Recipe, pages: dict[str, str | bytes], *, max_tenders: int | None = None
+    recipe: Recipe, pages: dict[str, str | bytes], *, max_tenders: int | None = None,
+    verify_all_pages: bool = False,
 ) -> list[RawTender]:
     fetcher = FakeFetcher(pages)
     try:
-        return await run_recipe(recipe, fetcher.for_portal("test"), max_tenders=max_tenders)
+        return await run_recipe(
+            recipe, fetcher.for_portal("test"),
+            max_tenders=max_tenders, verify_all_pages=verify_all_pages,
+        )
     finally:
         await fetcher.aclose()
 
@@ -125,6 +129,73 @@ def test_head_next_link_and_disabled_final_page_control() -> None:
     recipe.list_.max_pages = 1
     with pytest.raises(RecipeReadError, match="max_pages"):
         asyncio.run(_read(recipe, pages))
+
+
+@pytest.mark.parametrize("control", [
+    '<a href="?page=2">Next</a>',
+    '<a href="?seite=2">Weiter »</a>',
+    '<a href="/tenders/page/2">Suivant</a>',
+    '<nav class="paging"><a href="?step=2">Volgende</a></nav>',
+    '<a href="?step=2" aria-label="Página siguiente">›</a>',
+])
+def test_common_next_labels_reveal_missing_pagination(control: str) -> None:
+    url = f"{_MOCK_ORIGIN}/tenders"
+    recipe = Recipe.model_validate({"list": {"url": url, "item": "//li"}})
+    pages = {url: f"<ul><li>A</li></ul>{control}"}
+    with pytest.raises(RecipeReadError, match="missed the advertised next"):
+        asyncio.run(_read(recipe, pages))
+
+
+def test_unrelated_next_links_and_disabled_controls_are_ignored() -> None:
+    url = f"{_MOCK_ORIGIN}/tenders"
+    recipe = Recipe.model_validate({
+        "list": {"url": url, "item": "//li[@data-id]"}, "fields": {"id": "@data-id"},
+    })
+    pages = {url: """
+        <ul><li data-id="A">Tender A</li></ul>
+        <nav><a href="/apply">Next</a></nav>
+        <ul class="pagination"><li class="disabled"><a href="?page=2">Next</a></li></ul>
+    """}
+    assert [row.fields["id"] for row in asyncio.run(_read(recipe, pages))] == ["A"]
+
+
+@pytest.mark.parametrize("metadata", [{"total_count": 4}, {"pagination": {"totalCount": "4"}}])
+def test_json_validation_counts_the_whole_collection(metadata: dict) -> None:
+    url = f"{_MOCK_ORIGIN}/feed"
+    recipe = Recipe.model_validate({
+        "kind": "json_api", "list": {"url": url, "item": "$.items[*]", "next_page": "$.next"},
+        "fields": {"id": "$.id"},
+    })
+    pages = {
+        url: json.dumps({**metadata, "items": [{"id": "A"}, {"id": "B"}], "next": "?p=2"}),
+        url + "?p=2": '{"items":[{"id":"C"}]}',
+    }
+    with pytest.raises(RecipeReadError, match="advertised 4 tenders.*only 3 entries"):
+        asyncio.run(_read(recipe, pages, max_tenders=1, verify_all_pages=True))
+    pages[url + "?p=2"] = '{"items":[{"id":"C"},{"id":"D"}]}'
+    sample = asyncio.run(_read(recipe, pages, max_tenders=1, verify_all_pages=True))
+    assert [row.fields["id"] for row in sample] == ["A"]
+
+
+def test_boamp_fixture_cannot_serve_a_three_record_snapshot_as_the_whole_feed() -> None:
+    snapshot = Path(__file__).parents[1] / "testset/fixtures/boamp-fr/list.json"
+    url = f"{_MOCK_ORIGIN}/boamp/records?limit=3"
+    recipe = Recipe.model_validate({
+        "kind": "json_api", "list": {"url": url, "item": "$.results[*]"},
+        "fields": {"id": "$.idweb", "title": "$.objet"},
+    })
+
+    async def check():
+        fetcher = FakeFetcher({url: snapshot.read_bytes()})
+        try:
+            fetch = fetcher.for_portal("boamp")
+            for read in (run_recipe, validate_candidate):
+                with pytest.raises(RecipeReadError, match=r"1728870 tenders.*only 3 entries"):
+                    await read(recipe, fetch)
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(check())
 
 
 def test_json_recipe_handles_array_paths_and_relative_urls() -> None:
