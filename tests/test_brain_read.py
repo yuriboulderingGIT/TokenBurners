@@ -2,9 +2,10 @@ import asyncio
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
-from app.fetcher import FakeFetcher
+from app.fetcher import FakeFetcher, Fetcher
 from app.models import Locale, RawTender, Recipe
 from brain.blocks import Blocked
 from brain.normalize import normalize
@@ -108,6 +109,26 @@ def test_pagination_does_not_follow_urls_invented_by_a_selector() -> None:
     pages = {f"{_MOCK_ORIGIN}/tenders": '<ul><li>ID-1</li></ul><a href="/next">Next</a>'}
     with pytest.raises(RecipeReadError, match="absent from the page's links"):
         asyncio.run(_read(recipe, pages))
+
+
+def test_reader_checks_redirect_before_fetcher_follows_it() -> None:
+    recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
+    requests = []
+
+    def redirect(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "https://external.example/tenders"})
+
+    async def read() -> None:
+        fetcher = Fetcher(min_interval=0, transport=httpx.MockTransport(redirect))
+        try:
+            await run_recipe(recipe, fetcher.for_portal("test"))
+        finally:
+            await fetcher.aclose()
+
+    with pytest.raises(RecipeReadError, match="redirected outside"):
+        asyncio.run(read())
+    assert requests == [recipe.list_.url]
 
 
 def test_captcha_page_is_reported_as_blocked() -> None:

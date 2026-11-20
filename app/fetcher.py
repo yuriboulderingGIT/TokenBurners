@@ -11,7 +11,8 @@ pass portal ids around:  `await fetch.get(url)`.
 
 Notes for other agents:
 - Never use httpx/requests/urllib directly anywhere else: that breaks the 1 req/s rule.
-- Redirects are followed here, one rate-limited hop at a time. Don't pass follow_redirects.
+- Redirects are followed one rate-limited hop at a time. Pass follow_redirects=False
+  when the caller needs to check a destination before requesting it.
 - get() retries 429/5xx itself and returns the final response; check status_code yourself.
 - Don't catch PortalCancelled (or bare Exception around fetch calls without re-raising it):
   the worker needs it to stop work on a deleted portal.
@@ -100,11 +101,14 @@ class Fetcher:
             self._last[portal_id] = time.monotonic()
             self.request_log.append((portal_id, self._last[portal_id], url))
 
-    async def get(self, portal_id: str, url: str, **kw) -> httpx.Response:
+    async def get(
+        self, portal_id: str, url: str, *, follow_redirects: bool = True, **kw
+    ) -> httpx.Response:
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
             try:
-                response = await self._send(portal_id, self._client.build_request("GET", url, **kw))
+                request = self._client.build_request("GET", url, **kw)
+                response = await self._send(portal_id, request, follow_redirects=follow_redirects)
                 if response.status_code not in RETRY_STATUSES or attempt == self.retries:
                     return response
                 last_error = httpx.HTTPStatusError(
@@ -149,12 +153,15 @@ class Fetcher:
         finally:
             await response.aclose()
 
-    async def _send(self, portal_id: str, request: httpx.Request, stream: bool = False) -> httpx.Response:
+    async def _send(
+        self, portal_id: str, request: httpx.Request, *,
+        stream: bool = False, follow_redirects: bool = True,
+    ) -> httpx.Response:
         """Send one request, following redirects by hand: each hop is a request and waits its turn."""
         for _ in range(MAX_REDIRECTS + 1):
             await self.wait_turn(portal_id, str(request.url))
             response = await self._client.send(request, stream=stream)
-            if response.next_request is None:
+            if not follow_redirects or response.next_request is None:
                 return response
             await response.aclose()
             request = response.next_request
