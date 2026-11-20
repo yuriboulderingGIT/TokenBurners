@@ -45,7 +45,7 @@ request, goes through one rate limiter: at most 1 request per second per portal.
 | `OPENAI_API_KEY` | yes | | OpenAI key (handed over at submission) |
 | `OPENAI_MODEL` | no | `gpt-5-mini` | Cheap model for attach |
 | `OPENAI_MODEL_STRONG` | no | `gpt-5` | Strong model for repair |
-| `LLM_BUDGET_USD` | no | `5` | Total model budget; calls stop beyond it |
+| `LLM_BUDGET_USD` | no | `5` | Shared budget for completed and in-flight model calls |
 | `REFRESH_MINUTES` | no | `15` | How often each portal is re-read |
 | `FAILED_RETRY_MINUTES` | no | `180` | How often a failed portal is retried (plain read, no repair) |
 | `WORKER_CONCURRENCY` | no | `4` | Portals read at the same time |
@@ -54,5 +54,11 @@ request, goes through one rate limiter: at most 1 request per second per portal.
 | `DATA_DIR` | no | `/data` | Where the database and documents are stored |
 
 ## Model cost per portal
+
+Each model request reserves its maximum estimated cost in SQLite. Once OpenAI reports
+usage, Watchtower records the cost and releases the reservation. If a request is
+interrupted before usage is known, its reservation stays in `llm_reservations` across
+restarts. The default models and their dated snapshots have configured prices in
+`brain/llm.py`. Additional models need a price entry before they can spend the budget.
 
 TODO(A2): measured from the `llm_calls` table: attach $…, repair $…, regular read $0.
