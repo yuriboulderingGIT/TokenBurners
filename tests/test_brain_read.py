@@ -368,3 +368,28 @@ def test_normalizer_maps_optional_fields_and_keeps_withdrawal_status() -> None:
     assert tender.contractNature == "works"
     assert tender.cpvCodes == ["45233140", "90919200"]
     assert tender.api_dict()["placeOfPerformance"] == {"city": "Paris", "countryCode": "FR"}
+
+
+def test_cyprus_list_only_recipe_preserves_notice_links():
+    url = "https://www.eprocurement.gov.cy/epps/quickSearchAction.do?latest=true"
+    fixture = Path(__file__).parents[1] / "testset/fixtures/etenders-cy/list.html"
+    recipe = Recipe.model_validate({
+        "list": {"url": url, "item": "//table/tbody/tr"},
+        "fields": {"id": "normalize-space(td[3])", "title": "normalize-space(td[2]/a)"},
+    })
+    rows = asyncio.run(_read(recipe, {url: fixture.read_text()}))
+    assert len(rows) == 5
+    for row in rows:
+        assert row.url == "https://www.eprocurement.gov.cy/epps/cft/prepareViewCfTWS.do?resourceId=" + row.fields["id"]
+
+
+def test_ambiguous_title_links_keep_listing_url_and_explicit_field_wins():
+    url = "https://example.test/list"
+    page = '<article><a href="/one">Bridge</a><a href="/two">Bridge</a></article>'
+    recipe = Recipe.model_validate({
+        "list": {"url": url, "item": "//article"},
+        "fields": {"title": "string(a[1])"},
+    })
+    assert asyncio.run(_read(recipe, {url: page}))[0].url == url
+    recipe.fields["url"] = "a[2]/@href"
+    assert asyncio.run(_read(recipe, {url: page}))[0].url == "https://example.test/two"

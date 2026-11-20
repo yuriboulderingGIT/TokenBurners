@@ -172,6 +172,8 @@ async def run_recipe(
                     tender_url = _resolve_http_url(tender_url, values["url"]) or tender_url
                 else:
                     tender_url = resolve_portal_url(tender_url, values["url"], origin) or tender_url
+            if recipe.detail.link is None and tender_url == current_url and isinstance(entry, html.HtmlElement):
+                tender_url = _title_link(entry, values.get("title"), current_url, origin, document_urls) or current_url
             tenders.append(RawTender(url=tender_url, fields=values, document_links=document_urls))
         if following is None or (not verify_all_pages and max_tenders == sampled):
             break
@@ -185,6 +187,27 @@ async def run_recipe(
         if not tenders or (skipped >= 2 and skipped * 5 > sampled):
             raise RecipeReadError(message)
     return tenders
+
+
+def _title_link(
+    entry: html.HtmlElement, title: str | list[str] | None,
+    base_url: str, origin: Origin, document_urls: list[str],
+) -> str | None:
+    """Recover a notice permalink from a list-only recipe when the title is itself a link."""
+    if not isinstance(title, str) or not title.strip():
+        return None
+    label = " ".join(title.split())
+    matches = set()
+    for anchor in entry.iter("a"):
+        if "download" in anchor.attrib or " ".join(anchor.text_content().split()) != label:
+            continue
+        url = resolve_portal_url(base_url, anchor.get("href", ""), origin)
+        if not url or url == base_url or url in document_urls:
+            continue
+        if urlsplit(url).path.lower().endswith((".pdf", ".zip", ".doc", ".docx", ".xls", ".xlsx")):
+            continue
+        matches.add(url)
+    return matches.pop() if len(matches) == 1 else None
 
 
 def _selector(kind: str, expression: str | None, label: str) -> Selector:
