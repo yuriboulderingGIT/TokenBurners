@@ -34,3 +34,5 @@ Completed runs in this data folder, grouped by outcome. Runs with unresolved usa
 - A separate live read of Cyprus with model calls disabled returned ten notices, all ten publication dates and offset-bearing deadlines, and four files. All ten tender URLs pointed to the same listing. The source fixture contains individual notice links, so detail-link extraction remains incomplete.
 - Four portals ended with a JSON parsing error. Each recorded a model response at the 4,096-token output cap. The token counts point to possible truncation. The ledger records no response text to confirm it.
 - The Welsh portal documents a login requirement for hosted attachments. This run failed during attach before it could test a document. Its empty failure detail is preserved in the table. Subsequent builds supply a fallback explanation for that case.
+
+Earlier run: [B14 results from the Windows checkout](b14-results.md).

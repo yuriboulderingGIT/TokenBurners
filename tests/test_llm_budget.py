@@ -10,7 +10,7 @@ from app.db import DB
 from brain.llm import BudgetExceeded, LLM, LLMUnavailable
 
 
-def scoped(db, create, *, budget=0.01, cache=None, model="gpt-5-mini"):
+def scoped(db, create, *, budget=0.035, cache=None, model="gpt-5-mini"):
     llm = LLM(db, budget_usd=budget, cheap_model=model, cache_dir=cache)
     llm._client = SimpleNamespace(responses=SimpleNamespace(create=create))
     return llm.scoped("portal", "run", "attach")
@@ -21,6 +21,31 @@ def response(output_tokens, text='{"ok":true}'):
         output_text=text,
         usage=SimpleNamespace(input_tokens=32, output_tokens=output_tokens),
     )
+
+
+def test_json_mode_marks_input_even_when_the_portal_evidence_does_not(tmp_path):
+    async def create(**request):
+        assert request["text"]["format"]["type"] == "json_object"
+        assert request["reasoning"] == {"effort": "low"}
+        assert request["max_output_tokens"] == 16_384
+        assert "json" in request["input"].lower()
+        assert request["input"].endswith('{"entry": "Public notices"}')
+        return response(10)
+
+    client = scoped(DB(tmp_path / "watchtower.db"), create)
+    assert asyncio.run(client.json('{"entry": "Public notices"}')) == {"ok": True}
+
+
+def test_truncated_response_reports_the_cause_and_records_usage(tmp_path):
+    async def create(**request):
+        partial = response(request["max_output_tokens"], "")
+        partial.incomplete_details = SimpleNamespace(reason="max_output_tokens")
+        return partial
+
+    db = DB(tmp_path / "watchtower.db")
+    with pytest.raises(json.JSONDecodeError, match="output token limit"):
+        asyncio.run(scoped(db, create).json("Map this tender list"))
+    assert db.llm_total_cost() > 0 and not db.all("SELECT * FROM llm_reservations")
 
 
 def test_concurrent_workers_share_a_single_budget(tmp_path):

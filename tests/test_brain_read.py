@@ -63,6 +63,20 @@ def test_validation_sample_stops_before_the_next_request() -> None:
     assert [tender.fields["id"] for tender in output] == ["MOCK-001"]
 
 
+def test_multiple_gone_details_fail_after_both_mock_pages_are_counted():
+    recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
+    pages = _mock_pages(["MOCK-003", "MOCK-004", "MOCK-005"], second_page=True)
+    with pytest.raises(RecipeReadError, match="2 of 5 tender detail pages"):
+        asyncio.run(_read(recipe, pages))
+
+
+def test_dead_detail_counts_towards_the_validation_request_limit():
+    recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
+    pages = _mock_pages(["MOCK-002", "MOCK-003"], second_page=True)
+    sample = asyncio.run(_read(recipe, pages, max_tenders=3, verify_all_pages=True))
+    assert [row.fields["id"] for row in sample] == ["MOCK-002", "MOCK-003"]
+
+
 @pytest.mark.parametrize("selector", [None, "//a[@class='old-pager']/@href"])
 def test_missing_next_selector_rejected_even_with_a_full_sample(selector) -> None:
     recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
@@ -159,6 +173,27 @@ def test_unrelated_next_links_and_disabled_controls_are_ignored() -> None:
     assert [row.fields["id"] for row in asyncio.run(_read(recipe, pages))] == ["A"]
 
 
+def test_etenders_next_button_follows_the_observed_href_without_executing_script():
+    url = f"{_MOCK_ORIGIN}/search"
+    button = '<div aria-label="pagination toolbar"><button title="Next" href="?d-3680175-p=2"></button></div>'
+    pages = {url: "<li>A</li>" + button, url + "?d-3680175-p=2": "<li>B</li>"}
+    recipe = Recipe.model_validate({"list": {"url": url, "item": "//li"}, "fields": {"id": "text()"}})
+    with pytest.raises(RecipeReadError, match="missed the advertised next page"):
+        asyncio.run(_read(recipe, pages))
+    recipe.list_.next_page = "//button[@title='Next']/@href"
+    assert [row.fields["id"] for row in asyncio.run(_read(recipe, pages))] == ["A", "B"]
+
+
+def test_active_postback_pager_cannot_serve_only_its_first_page():
+    url = f"{_MOCK_ORIGIN}/search"
+    button = '<div class="pager"><button href="javascript:void(0)" onclick="postback()">Next</button></div>'
+    recipe = Recipe.model_validate({"list": {"url": url, "item": "//li"}, "fields": {"id": "text()"}})
+    with pytest.raises(RecipeReadError, match="next page control provides no public HTTP link"):
+        asyncio.run(_read(recipe, {url: "<li>A</li>" + button}))
+    last = button.replace("<button ", "<button disabled ")
+    assert len(asyncio.run(_read(recipe, {url: "<li>A</li>" + last}))) == 1
+
+
 @pytest.mark.parametrize("metadata", [{"total_count": 4}, {"pagination": {"totalCount": "4"}}])
 def test_json_validation_counts_the_whole_collection(metadata: dict) -> None:
     url = f"{_MOCK_ORIGIN}/feed"
@@ -225,7 +260,7 @@ def test_json_recipe_handles_array_paths_and_relative_urls() -> None:
         ("1", f"{_MOCK_ORIGIN}/tenders/1"),
         ("2", "https://notices.example/tenders/2"),
     ]
-    assert output[0].document_links == [f"{_MOCK_ORIGIN}/docs/1"]
+    assert output[0].document_links == [f"{_MOCK_ORIGIN}/docs/1", "https://external.example/doc"]
 
 
 @pytest.mark.parametrize(("url", "error"), [
@@ -240,6 +275,18 @@ def test_invalid_pagination_is_not_treated_as_a_complete_read(url: str, error: s
     pages = {f"{_MOCK_ORIGIN}/tenders": f'<ul><li>ID-1</li></ul><a href="{url}">Next</a>'}
     with pytest.raises(RecipeReadError, match=error):
         asyncio.run(_read(recipe, pages))
+
+
+def test_cross_host_documents_must_be_public_links_observed_in_the_row():
+    url = f"{_MOCK_ORIGIN}/tenders"
+    pages = {url: '<li><a href="https://user@downloads.example/private">file</a></li>'}
+    recipe = Recipe.model_validate({
+        "list": {"url": url, "item": "//li"},
+        "documents": {"link": ".//a/@href"},
+    })
+    assert asyncio.run(_read(recipe, pages))[0].document_links == []
+    recipe.documents.link = "'https://downloads.example/unobserved'"
+    assert asyncio.run(_read(recipe, pages))[0].document_links == []
 
 
 def test_pagination_does_not_follow_urls_invented_by_a_selector() -> None:
