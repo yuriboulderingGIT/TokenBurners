@@ -91,6 +91,17 @@ def new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def close_if_past_deadline(tender: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """The tender as clients see it. Stored tenders are only rewritten by a healthy read, so a
+    portal that is healing or failed would keep serving `open` past the deadline. The change
+    happened at the deadline, so that is its lastChangedAt (changedSince clients see it)."""
+    deadline = tender.get("submissionDeadline")
+    if tender["status"] != "open" or not deadline or datetime.fromisoformat(deadline) > now:
+        return tender
+    changed = max(tender["lastChangedAt"], deadline, key=datetime.fromisoformat)
+    return tender | {"status": "closed", "lastChangedAt": changed}
+
+
 class DB:
     def __init__(self, path: Path | str = DB_PATH) -> None:
         path = Path(path)
@@ -299,11 +310,16 @@ class DB:
         data.pop("lastChangedAt", None)
         digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
         old = conn.execute(
-            "SELECT hash, last_changed_at, last_seen_at FROM tenders WHERE portal_id = ? AND id = ?",
+            "SELECT json, hash, last_changed_at, last_seen_at FROM tenders WHERE portal_id = ? AND id = ?",
             (portal_id, data["id"]),
         ).fetchone()
         changed = old is None or old["hash"] != digest
         last_changed = now if changed else old["last_changed_at"]
+        if changed and old is not None:
+            # Already served as closed at its deadline: same data, so not a second change.
+            served = close_if_past_deadline(json.loads(old["json"]), datetime.fromisoformat(now))
+            if {k: v for k, v in served.items() if k != "lastChangedAt"} == data:
+                last_changed = served["lastChangedAt"]
         last_seen = now if seen_now or old is None else old["last_seen_at"]
         data["lastChangedAt"] = last_changed
         conn.execute(
