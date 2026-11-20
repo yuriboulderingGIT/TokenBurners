@@ -1,0 +1,116 @@
+{% extends "_base.html" %}
+{% block title %}{{ host }} · Watchtower{% endblock %}
+
+{% block content %}
+  <a class="crumb" href="/">← All portals</a>
+{% if portal is none %}
+  <div class="title"><h1>Portal not found</h1></div>
+  <p class="muted">It may have been removed. Go back to the <a href="/">portal monitor</a>.</p>
+{% else %}
+  <div class="title {{ portal.state }}">
+    <h1>{{ host }}</h1>
+    <span class="pill"><i class="dot"></i>{{ portal.state }}</span>
+  </div>
+  <div class="facts">
+    <span title="{{ portal.url }}"><a href="{{ portal.url }}" rel="noopener" target="_blank">{{ portal.url }}</a></span>
+  </div>
+  <div class="facts">
+    <span>{{ portal.reason or "no reason recorded" }}</span>
+  </div>
+  <div class="facts">
+    <span><b>{{ open_count }}</b> open of <b>{{ tenders|length }}</b> tenders</span>
+    <span><b>{{ doc_count }}</b> documents</span>
+    <span>Last good read <b title="{{ portal.last_success_at or '' }}">{{ portal.last_success_at|ago }}</b></span>
+    <span>Recipe {% if recipes %}<b>v{{ recipes[0].version }}</b>
+      ({% for r in recipes %}v{{ r.version }} {{ "learned" if r.created_by == "attach" else "repaired" }} {{ r.created_at|ago }}{{ ", " if not loop.last }}{% endfor %})
+      {% else %}<b>none yet</b>{% endif %}</span>
+    <span>Model cost <b>${{ "%.3f"|format(cost) }}</b></span>
+  </div>
+  <div class="actions">
+    <button class="btn ghost" id="refresh" type="button">Read again now</button>
+    <button class="btn ghost danger" id="remove" type="button">Remove portal</button>
+  </div>
+
+  <div class="stack">
+    <section class="panel" aria-label="Tenders">
+      <div class="panel-head"><h2>Tenders</h2>
+        <span class="faint">{{ "kept from the last correct read while the portal is " ~ portal.state if portal.state in ("healing", "failed") and tenders else tenders|length ~ " total" }}</span></div>
+      <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>Status</th><th>Tender</th><th class="hide-sm">Buyer</th><th class="hide-sm">Published</th>
+          <th>Deadline</th><th>Documents</th><th class="hide-sm">Changed</th>
+        </tr></thead>
+        <tbody>
+        {% for t in tenders %}
+        <tr class="{{ {'open': 'serving', 'closed': 'off', 'withdrawn': 'failed'}[t.status] }}">
+          <td><span class="pill"><i class="dot"></i>{{ t.status }}</span></td>
+          <td>
+            <div class="t-title"><a href="{{ t.url }}" rel="noopener" target="_blank">{{ t.title or "(no title shown)" }}</a></div>
+            <div class="t-meta">{{ t.id }}{% if t.referenceNumber and t.referenceNumber != t.id %} · ref {{ t.referenceNumber }}{% endif %}
+              {% if t.contractNature %} · {{ t.contractNature }}{% endif %}{% if t.cpvCodes %} · CPV {{ t.cpvCodes|join(", ") }}{% endif %}</div>
+          </td>
+          <td class="hide-sm">{{ t.buyerName or "–" }}</td>
+          <td class="hide-sm nowrap">{{ t.publicationDate|day }}</td>
+          <td class="nowrap" title="{{ t.submissionDeadline or 'not shown by the portal' }}">{{ t.submissionDeadline|when }}</td>
+          <td>
+            {% if t.documents %}
+            <details><summary>{{ t.documents|length }} file{{ "s" if t.documents|length != 1 }}</summary>
+              <ul class="docs">
+                {% for d in t.documents %}<li><a href="{{ d.path }}" title="sha256 {{ d.sha256 }}">{{ d.fileName }}</a><span class="faint nowrap">{{ d.sizeBytes|size }}</span></li>{% endfor %}
+              </ul>
+            </details>
+            {% else %}<span class="faint">none</span>{% endif %}
+          </td>
+          <td class="hide-sm nowrap" title="{{ t.lastChangedAt }}">{{ t.lastChangedAt|ago }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty">
+          {% if portal.state == "integrating" %}Nothing delivered yet: the system is still learning how to read this portal.
+          {% else %}No tenders held for this portal.{% endif %}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="Runs">
+      <div class="panel-head"><h2>What the system did</h2><span class="faint">every read and repair, newest first</span></div>
+      <ul class="feed">
+        {% for r in runs %}
+        {% set lines = (r.notes or "").strip().splitlines() %}
+        {% set st = "serving" if r.result == "ok" else "failed" if r.result == "failed" else "integrating" %}
+        <li class="{{ 'healing' if r.kind == 'repair' and r.result == 'ok' else st }}">
+          <i class="dot"></i>
+          <span class="what">{{ r.kind|capitalize }} {{ r.result or "running" }}{% if r.model_cost_usd %} <span class="faint">· ${{ "%.4f"|format(r.model_cost_usd) }}</span>{% endif %}</span>
+          <span class="when" title="{{ r.started_at }}">{{ r.started_at|ago }}{% if r.took %} · took {{ r.took }}{% endif %}</span>
+          {% if lines %}<details><summary>{{ lines[-1].split("] ", 1)[-1] }}</summary><pre>{{ r.notes }}</pre></details>{% endif %}
+        </li>
+        {% else %}
+        <li class="empty">No runs yet.</li>
+        {% endfor %}
+      </ul>
+    </section>
+  </div>
+{% endif %}
+{% endblock %}
+
+{% block script %}
+{% if portal is not none %}
+  document.getElementById("refresh").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      await call("POST", "/portals/{{ portal.id }}/refresh");
+      flash("Read started. This page updates by itself.");
+    } catch (err) { flash(`Could not start a read: ${err.message}`, true); }
+    e.target.disabled = false;
+  });
+  document.getElementById("remove").addEventListener("click", async () => {
+    if (!confirm({{ ("Remove " ~ host ~ "? Watchtower stops reading it within a minute.")|tojson }})) return;
+    try {
+      await call("DELETE", "/portals/{{ portal.id }}");
+      location.href = "/";
+    } catch (err) { flash(`Could not remove the portal: ${err.message}`, true); }
+  });
+{% endif %}
+{% endblock %}

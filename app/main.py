@@ -38,7 +38,29 @@ def _ago(value: str | None) -> str:
     return f"{seconds // 86400} d ago"
 
 
-templates.env.filters["ago"] = _ago
+def _when(value: str | None) -> str:
+    """'2026-12-09T10:00:00+01:00' -> '09 Dec 2026, 10:00 +01:00' (the portal's own local time)."""
+    if not value:
+        return "not shown"
+    parsed = datetime.fromisoformat(value)
+    return parsed.strftime("%d %b %Y, %H:%M ") + parsed.strftime("%z")[:3] + ":" + parsed.strftime("%z")[3:]
+
+
+def _day(value: str | None) -> str:
+    return datetime.fromisoformat(value).strftime("%d %b %Y") if value else "–"
+
+
+def _size(n: int | None) -> str:
+    if n is None:
+        return ""
+    for unit in ("B", "KB", "MB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+templates.env.filters.update(ago=_ago, when=_when, day=_day, size=_size)
 
 
 @asynccontextmanager
@@ -178,6 +200,39 @@ async def dashboard(request: Request):
             "now": datetime.now(timezone.utc).strftime("%H:%M:%S"),
         },
     )
+
+
+@app.get("/ui/portals/{portal_id}", response_class=HTMLResponse)
+async def portal_page(portal_id: str, request: Request):
+    """The operator's view of one portal: its tenders, documents and every run (the JSON API stays as is)."""
+    row = db.portal_get(portal_id)
+    now = datetime.now(timezone.utc)
+    context: dict = {"portal": None, "host": "Portal not found", "now": now.strftime("%H:%M:%S")}
+    if row is None:
+        return templates.TemplateResponse(request, "portal.html", context, status_code=404)
+    tenders = [close_if_past_deadline(t, now) for t in db.tenders_for(portal_id)]
+    # Open first, then the nearest deadline; tenders without a deadline last.
+    tenders.sort(key=lambda t: (t["status"] != "open", t.get("submissionDeadline") is None,
+                                _parse_time(t["submissionDeadline"]) if t.get("submissionDeadline") else now))
+    runs = []
+    for r in db.runs_for(portal_id, limit=100):
+        took = None
+        if r["finished_at"]:
+            seconds = (datetime.fromisoformat(r["finished_at"]) - datetime.fromisoformat(r["started_at"])).total_seconds()
+            took = f"{seconds:.0f} s" if seconds < 120 else f"{seconds / 60:.0f} min"
+        runs.append(dict(r) | {"took": took})
+    parts = row["url"].split("/", 3)
+    context |= {
+        "portal": dict(row),
+        "host": parts[2] if len(parts) > 2 else row["url"],
+        "tenders": tenders,
+        "open_count": sum(t["status"] == "open" for t in tenders),
+        "doc_count": sum(len(t["documents"]) for t in tenders),
+        "runs": runs,
+        "recipes": db.recipe_history().get(portal_id, []),
+        "cost": db.llm_cost_by_portal().get(portal_id, 0.0),
+    }
+    return templates.TemplateResponse(request, "portal.html", context)
 
 
 def _parse_time(value: str) -> datetime:
