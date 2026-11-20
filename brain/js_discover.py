@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import re
+import sys
+from contextlib import AsyncExitStack
 from urllib.parse import urlsplit
 
 import httpx
@@ -51,6 +53,10 @@ Use only fields shown in the evidence. Do not invent IDs, URLs, or pagination ru
 Map fields to id, url, title, buyerName, publicationDate, submissionDeadline, status,
 referenceNumber, description, procedureType, contractNature, and cpvCodes when present.
 Prefer feeds whose records contain the data directly. Do not supply any endpoint URL."""
+
+
+class DiscoveryUnavailable(RecipeReadError):
+    """The local browser runtime cannot inspect the portal."""
 
 
 async def discover_json_api(
@@ -145,6 +151,11 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = 
     origin = portal_origin(url)
     if origin is None:
         return []
+    if sys.platform == "win32" and isinstance(asyncio.get_running_loop(), asyncio.SelectorEventLoop):
+        raise DiscoveryUnavailable(
+            "browser discovery needs subprocess support. On Windows, run Uvicorn without "
+            "--reload and with one worker"
+        )
 
     visit = PublicVisit(fetch)
     searches = {}
@@ -243,8 +254,21 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = 
         await route.close()
 
     try:
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch()
+        async with AsyncExitStack() as stack:
+            try:
+                playwright = await stack.enter_async_context(async_playwright())
+            except (Error, OSError, NotImplementedError) as exc:
+                log.debug("Playwright could not start: %s", exc)
+                raise DiscoveryUnavailable("could not start Playwright for browser discovery") from exc
+            try:
+                browser = await playwright.chromium.launch()
+            except (Error, OSError) as exc:
+                log.debug("Chromium could not launch: %s", exc)
+                if "Executable doesn't exist" in str(exc):
+                    raise DiscoveryUnavailable(
+                        "browser discovery needs Chromium. Run python -m playwright install chromium"
+                    ) from exc
+                raise DiscoveryUnavailable("could not launch Chromium for browser discovery") from exc
             try:
                 context = await browser.new_context(
                     offline=True, service_workers="block", accept_downloads=False

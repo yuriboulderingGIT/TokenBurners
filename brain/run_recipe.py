@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable, Iterator
 from itertools import islice
 from typing import Any
-from urllib.parse import parse_qs, urldefrag, urljoin, urlsplit
+from urllib.parse import parse_qs, urlencode, urldefrag, urljoin, urlsplit
 
 import httpx
 from jsonpath_ng import parse as parse_jsonpath
@@ -15,6 +15,7 @@ from lxml import etree, html
 
 from app.fetcher import PortalFetcher
 from app.models import RawTender, Recipe
+from brain import berlin_documents, charite_documents
 from brain.blocks import Blocked, detect_block
 from brain.shrink import shrink
 
@@ -33,7 +34,7 @@ _NEXT_LABELS = {
     "siguiente", "successiva", "successivo", "następna", "dalej", "seguinte", "próxima",
 }
 _PAGE_QUERY_KEYS = {
-    "p", "page", "pagenumber", "pageindex", "offset", "skip", "start", "cursor", "seite", "pagina",
+    "p", "page", "pagenum", "pagenumber", "pageindex", "offset", "skip", "start", "cursor", "seite", "pagina",
 }
 _PAGER_CONTEXT = re.compile(r"\b(?:pagination|paginator|paging|pager|page navigation)\b", re.I)
 _PAGE_PATH_SUFFIX = re.compile(r"/(?:page|seite|pagina)/[0-9]+/?$", re.I)
@@ -144,17 +145,23 @@ async def run_recipe(
         advertised_count = max(advertised_count, _advertised_total_count(page))
         if search_pages:
             following = page_url if search_pages.more(entries, observed_count) else None
+        elif isinstance(page, html.HtmlElement) and _declared_last_page(page, current_url):
+            following = None
         else:
             try:
-                advertised = advertised_next_urls(page, current_url)
-                selected = next_page(page)
-                if recipe.kind == "html" and not advertised and selected and _last_numbered_page(page, current_url):
-                    if all(link.lower().replace(" ", "") in {"javascript:void(0);", "javascript:void(0)", "#"}
-                           for link in _strings(selected, links=True)):
-                        selected = []
-                following = _navigation_url(
-                    current_url, selected, origin, "list.next_page", source=page, advertised=advertised,
-                )
+                advertised, get_forms = _advertised_pagination(page, current_url)
+                if advertised == get_forms and len(get_forms) == 1:
+                    following = next(iter(get_forms))
+                else:
+                    selected = next_page(page)
+                    if (isinstance(page, html.HtmlElement) and not advertised and selected
+                            and _last_numbered_page(page, current_url)):
+                        if all(link.lower().replace(" ", "") in {"javascript:void(0);", "javascript:void(0)", "#"}
+                               for link in _strings(selected, links=True)):
+                            selected = []
+                    following = _navigation_url(
+                        current_url, selected, origin, "list.next_page", source=page, advertised=advertised,
+                    )
             except RecipeReadError as exc:
                 raise PaginationError(str(exc), sample_page) from exc
             if advertised and following not in advertised:
@@ -237,6 +244,23 @@ async def run_recipe(
                                 matches.add(url)
                     if len(matches) == 1:
                         tender_url = matches.pop()
+            if isinstance(entry, html.HtmlElement) and (answers := charite_documents.answers_url(
+                current_url, entry, values.get("id"),
+            )):
+                document_urls.append(answers)
+            if isinstance(entry, html.HtmlElement) and (delegate := berlin_documents.detail_url(
+                current_url, entry, values.get("id"),
+            )):
+                tender_url = delegate
+                try:
+                    detail_response = await fetch_page(fetch, delegate, portal_origin(delegate))
+                    if not urlsplit(str(detail_response.url)).path.startswith("/public/publications/"):
+                        raise RecipeReadError("Berlin detail did not open a public RIB notice")
+                    detail_doc = _parse_page(detail_response, "html")
+                    document_urls.extend(berlin_documents.document_urls(detail_doc))
+                except (Blocked, RecipeReadError, httpx.HTTPError) as exc:
+                    # The listing remains readable when one delegated detail is unavailable.
+                    log.info("Berlin document source unavailable: %s", exc)
             tenders.append(RawTender(url=tender_url, fields=values, document_links=document_urls))
         if following is None or (not verify_all_pages and max_tenders == sampled):
             break
@@ -386,9 +410,18 @@ def _navigation_url(
 
 def advertised_next_urls(page: Any, base_url: str) -> set[str]:
     """Independent evidence that treating this listing as the final page would lose rows."""
+    return _advertised_pagination(page, base_url)[0]
+
+
+def _advertised_pagination(page: Any, base_url: str) -> tuple[set[str], set[str]]:
     links = []
+    form_urls = set()
     if isinstance(page, html.HtmlElement):
-        links.extend(node.get("href", "") for node in next_page_controls(page, base_url))
+        for node in next_page_controls(page, base_url):
+            href = node.get("href", "")
+            links.append(href)
+            if node.tag == "button" and not href and (target := _get_pager_url(node, base_url)):
+                form_urls.add(target)
     elif isinstance(page, dict):
         # A JSON 'next' can also be an opaque cursor. Only explicit URL references count.
         for container in (page, page.get("links"), page.get("_links"), page.get("pagination")):
@@ -398,12 +431,94 @@ def advertised_next_urls(page: Any, base_url: str) -> set[str]:
                     value = value.get("href")
                 if isinstance(value, str) and value.startswith(("/", "?", "./", "../", "http://", "https://")):
                     links.append(value)
-    else:
-        return set()
-    urls = {url for link in links if (url := _resolve_http_url(base_url, link))}
+    urls = form_urls | {url for link in links if (url := _resolve_http_url(base_url, link))}
     if isinstance(page, html.HtmlElement) and links and not urls and not _last_numbered_page(page, base_url):
         raise NoPublicNextLink("the next page control provides no public HTTP link")
-    return urls
+    return urls, form_urls
+
+
+def _get_pager_url(button: html.HtmlElement, base_url: str) -> str | None:
+    name = button.get("name", "")
+    value = button.get("value", "")
+    if name.casefold() not in _PAGE_QUERY_KEYS or not re.fullmatch(r"[0-9]{1,12}", value):
+        return None
+    if button.get("type", "submit").lower() != "submit" or any(
+        key.startswith(("form", "on")) for key in button.attrib
+    ):
+        return None
+    form = next(button.iterancestors("form"), None)
+    if form is None:
+        return None
+    return _public_get_form(form, base_url, [(name, value)])
+
+
+def empty_search_url(page: html.HtmlElement | None, base_url: str) -> str | None:
+    """Find one explicitly public search form that can be sent without a keyword."""
+    if page is None:
+        return None
+    candidates = {
+        url for form in page.xpath("descendant-or-self::form[@role='search']")
+        if (url := _public_get_form(form, base_url, [], empty_search=True)) and url != base_url
+    }
+    if len(candidates) == 1:
+        return candidates.pop()
+    path = urlsplit(base_url).path.rstrip("/") + "/"
+    if path == "/":
+        return None
+    # Pages can also carry a site-wide search. Prefer the form under this listing's own path.
+    local = {url for url in candidates if urlsplit(url).path.startswith(path)}
+    return local.pop() if len(local) == 1 else None
+
+
+def _public_get_form(
+    form: html.HtmlElement, base_url: str, submit: list[tuple[str, str]], *, empty_search: bool = False,
+) -> str | None:
+    if form.get("method", "").lower() != "get" or any(key.startswith("on") for key in form.attrib):
+        return None
+    origin = portal_origin(base_url)
+    target = resolve_portal_url(base_url, form.get("action", ""), origin) if origin else None
+    if not target:
+        return None
+    found_search = False
+    params = []
+    for control in form.xpath(".//input|.//select|.//textarea|.//button"):
+        if _is_disabled(control) or control.xpath("ancestor::fieldset[@disabled]"):
+            continue
+        if control.tag == "button" or control.get("type", "").lower() == "submit":
+            if empty_search and any(key.startswith(("form", "on")) for key in control.attrib):
+                return None
+            continue
+        if control.tag != "input" or "form" in control.attrib:
+            return None
+        name = control.get("name")
+        kind = control.get("type", "text").lower()
+        if kind == "hidden" and name:
+            params.append((name, control.get("value", "")))
+        elif empty_search and kind == "search" and name and "required" not in control.attrib:
+            if control.get("value", "").strip() or control.get("minlength", "0") != "0":
+                return None
+            found_search = True
+            params.append((name, ""))
+        else:
+            return None
+    if empty_search and not found_search:
+        return None
+    url = urlsplit(target)._replace(query=urlencode(params + submit)).geturl()
+    return url if len(url) <= 4096 else None
+
+
+def _declared_last_page(page: html.HtmlElement, current_url: str) -> bool:
+    """An explicit last-page URL can disambiguate an unlabeled forward arrow."""
+    last_urls: set[str] = set()
+    for node in page.xpath("//a[@rel and @href] | //link[@rel and @href]"):
+        relations = node.get("rel", "").lower().split()
+        if "next" in relations and _is_next_page_link(node, current_url):
+            return False
+        if "last" in relations:
+            target = _resolve_http_url(current_url, node.get("href", ""))
+            if target is not None:
+                last_urls.add(target)
+    return last_urls == {current_url}
 
 
 def next_page_controls(page: html.HtmlElement, base_url: str) -> list[html.HtmlElement]:

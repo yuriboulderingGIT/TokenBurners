@@ -161,6 +161,9 @@ def _parse_date(value: str | None, locale: Locale) -> datetime | None:
 
 
 def _deadline(value: str | None, locale: Locale) -> datetime | None:
+    if value:
+        # Charité and similar German listings write local times as "10:00h".
+        value = re.sub(r"(\b\d{1,2}:\d{2})h\b", r"\1", value, flags=re.I)
     if not value or not _CLOCK.search(value):
         return None
     parsed = _parse_date(value, locale)

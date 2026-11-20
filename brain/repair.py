@@ -1,4 +1,4 @@
-"""Replace a failing recipe only after the new recipe passes a sample read."""
+"""Find and sample a replacement for a failing recipe."""
 
 import json
 from collections.abc import Iterator
@@ -12,14 +12,14 @@ from app.models import Health, Recipe, Tender
 from brain.blocks import Blocked
 from brain.js_discover import discover_json_api
 from brain.learn import (
-    PageSample, RecipeValidationError, StoredTenderIds, contains_stored_id, detail_sample,
+    PageSample, RecipeValidationError, StoredTenderIds, _page_sample, _script_shell, contains_stored_id, detail_sample,
     propose_html_recipe, read_page_sample, validate_candidate,
 )
 from brain.llm import ScopedLLM
 from brain.normalize import _single_text
 from brain.run_recipe import (
     Origin, PaginationError, RecipeReadError, _field_value, _navigation_url, _observed_href, _selector,
-    canonical_origin, fetch_page, portal_origin,
+    canonical_origin, fetch_page, is_json_response, portal_origin,
 )
 
 MAX_TRIES = 3
@@ -123,27 +123,39 @@ async def repair(
         if portal_origin(discovery_url) != origin:
             return None
     stored_ids = StoredTenderIds.from_tenders(stored_tenders, recipe) if stored_tenders else None
+    html_listing = None
+    json_entry = None
     if recipe.kind == "html" and recipe.list_.search is None:
         try:
-            listing = await read_page_sample(recipe.list_.url, fetch, origin, stored_ids=stored_ids)
-            detail, detail_stored_id = await _repair_detail(recipe, listing, fetch, origin, stored_ids)
+            response = await fetch_page(fetch, recipe.list_.url, origin)
+            if is_json_response(response):
+                json_entry = response
+                discovery_url = str(response.url)
+            else:
+                listing = _page_sample(response, origin, stored_ids, requested_url=recipe.list_.url)
+                if _script_shell(listing):
+                    discovery_url = listing.url
+                else:
+                    html_listing = listing
+                    detail, detail_stored_id = await _repair_detail(recipe, listing, fetch, origin, stored_ids)
         except (RecipeReadError, httpx.HTTPError):
             return None
 
     feedback = list(health.problems)
     for _ in range(MAX_TRIES):
         try:
-            if recipe.kind == "html" and recipe.list_.search is None:
+            if html_listing is not None:
                 candidate = await propose_html_recipe(
-                    listing, detail, fetch, llm, strong=True, feedback=feedback, previous=recipe,
+                    html_listing, detail, fetch, llm, strong=True, feedback=feedback, previous=recipe,
                     pagination_page=pagination_page, expected_document_ids=health.missing_document_ids,
                     stored_ids=stored_ids, detail_stored_id=detail_stored_id,
                 )
                 if detail and detail_stored_id:
-                    _check_stored_detail(candidate, listing, detail, detail_stored_id, origin)
+                    _check_stored_detail(candidate, html_listing, detail, detail_stored_id, origin)
                 return candidate
             candidate = await discover_json_api(
-                discovery_url, fetch, llm, previous_recipe=recipe, health=Health(ok=False, problems=feedback)
+                discovery_url, fetch, llm, previous_recipe=recipe, health=Health(ok=False, problems=feedback),
+                entry_response=json_entry,
             )
             if candidate is None:
                 feedback.append("the public JSON list could not be rediscovered")
