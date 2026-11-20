@@ -55,3 +55,20 @@ def test_fake_fetcher_serves_pages() -> None:
         return ok.status_code, ok.text, missing.status_code
 
     assert asyncio.run(run()) == (200, "<html>ok</html>", 404)
+
+
+def test_redirect_hops_each_wait_their_turn() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/old":
+            return httpx.Response(302, headers={"location": "https://a.test/new"})
+        return httpx.Response(200, text="here")
+
+    async def run() -> tuple[str, list[float]]:
+        f = Fetcher(min_interval=0.2, transport=httpx.MockTransport(handler))
+        r = await f.get("p1", "https://a.test/old")
+        await f.aclose()
+        return r.text, [t for _, t, _ in f.request_log]
+
+    text, times = asyncio.run(run())
+    assert text == "here"
+    assert len(times) == 2 and times[1] - times[0] >= 0.19

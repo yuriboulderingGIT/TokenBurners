@@ -4,6 +4,7 @@ Run locally:  uvicorn app.main:app --port 8080 --reload
 """
 
 import logging
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,7 +74,10 @@ async def create_portal(body: CreatePortal, request: Request) -> dict:
         db.portal_revive(portal_id)
         worker.revive(portal_id)
     else:
-        portal_id = db.portal_create(url)
+        try:
+            portal_id = db.portal_create(url)
+        except sqlite3.IntegrityError:  # same URL posted twice at the same moment
+            return {"id": db.portal_by_url(url)["id"]}
     worker.request_read(portal_id)
     return {"id": portal_id}
 
