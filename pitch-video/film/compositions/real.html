@@ -1,0 +1,42 @@
+<template>
+  <style>
+@font-face { font-family: "Mona Sans"; src: url('assets/fonts/MonaSans-latin.woff2') format('woff2'); font-weight: 200 900; }
+#root { position: absolute; inset: 0; font-family: "Mona Sans", sans-serif; color: #18181b; }
+.win { position: absolute; left: 192px; top: 40px; width: 1536px; height: 864px; border-radius: 22px; overflow: hidden;
+  background: #fff; box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
+.cam { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
+.cam img { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
+.ring { position: absolute; border: 2px solid #6366f1; border-radius: 12px; box-shadow: 0 0 0 5px rgba(99,102,241,.16); opacity: 0; }
+.card { position: absolute; background: rgba(255,255,255,.97); border-radius: 22px; opacity: 0;
+  box-shadow: 0 30px 80px rgba(49,46,129,.18), 0 2px 8px rgba(24,24,27,.07); }
+.mono { font-family: "JetBrains Mono", monospace; }
+.pill { display: inline-flex; align-items: center; gap: 12px; border-radius: 999px; font-weight: 600; }
+.pill i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
+.browser { position: absolute; border-radius: 18px; overflow: hidden; background: #fff; opacity: 0;
+  box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
+.browser .bar { height: 58px; background: #ecebf3; display: flex; align-items: center; gap: 10px; padding: 0 22px; }
+.browser .bar b { width: 13px; height: 13px; border-radius: 50%; background: #cfcdd9; display: inline-block; }
+.browser .bar span { margin-left: 18px; background: #fff; border-radius: 999px; padding: 4px 22px; font-size: 28px; color: #52525b; }
+.browser .page { position: relative; overflow: hidden; }
+.browser .page img { position: absolute; left: 0; top: 0; }
+</style>
+  <div id="root" data-composition-id="real" data-width="1920" data-height="1080">
+    <div class="win" id="real-w"><div class="cam" id="real-w-cam"><img id="real-w-0" src="assets/img/ezak.jpg" alt="" style="opacity:1"><img id="real-w-1" src="assets/img/run3.jpg" alt="" style="opacity:0"><div class="ring" id="real-w-r-ezak" style="left:17.0px;top:273.8px;width:514.0px;height:39.2px"></div><div class="ring" id="real-w-r-deliver" style="left:249.0px;top:137.0px;width:294.0px;height:58.0px"></div><div class="ring" id="real-w-r-why" style="left:17.0px;top:409.0px;width:1030.0px;height:262.0px"></div></div></div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.set("#real-w-cam", {transformOrigin: "0 0", x: 0, y: 0, scale: 1}, 0);
+    tl.to("#real-w-cam", {x: -16.3, y: -83.0, scale: 1.9806, duration: 0.01, ease: "power3.inOut"}, 0.0);
+    tl.to("#real-w-r-ezak", {opacity: 1, duration: 0.3, ease: "power2.out"}, 0.5);
+    tl.to("#real-w-r-ezak", {opacity: 0, duration: 0.2, ease: "power1.in"}, 3.068);
+    tl.set("#real-w-1", {opacity: 1}, 2.968);
+    tl.set("#real-w-0", {opacity: 0}, 2.968);
+    tl.set("#real-w-cam", {x: 0, y: 0, scale: 1}, 2.968);
+    tl.to("#real-w-cam", {x: -26.7, y: 0, scale: 1.6696, duration: 0.5, ease: "power3.inOut"}, 3.0180000000000002);
+    tl.to("#real-w-r-deliver", {opacity: 1, duration: 0.3, ease: "power2.out"}, 3.418);
+    tl.to("#real-w-r-deliver", {opacity: 0, duration: 0.2, ease: "power1.in"}, 4.821000000000001);
+    tl.to("#real-w-cam", {x: -23.6, y: -365.5, scale: 1.4769, duration: 0.6, ease: "power3.inOut"}, 4.771);
+    tl.to("#real-w-r-why", {opacity: 1, duration: 0.3, ease: "power2.out"}, 5.977);
+    window.__timelines["real"] = tl;
+  </script>
+</template>

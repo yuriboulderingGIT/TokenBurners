@@ -1,0 +1,17 @@
+# secrets
+.env
+# local tools and caches
+.venv/
+node_modules/
+.claude/
+Claude editing skill/
+.hyperframes/
+film/.hyperframes/
+film/check.json
+film/AGENTS.md
+film/CLAUDE.md
+__pycache__/
+# big media kept out of git (renders, raw captures, voice cache and auditions)
+/output/
+/capture/
+/voice/

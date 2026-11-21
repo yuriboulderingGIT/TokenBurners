@@ -1,0 +1,56 @@
+<template>
+  <style>
+@font-face { font-family: "Mona Sans"; src: url('assets/fonts/MonaSans-latin.woff2') format('woff2'); font-weight: 200 900; }
+#root { position: absolute; inset: 0; font-family: "Mona Sans", sans-serif; color: #18181b; }
+.win { position: absolute; left: 192px; top: 40px; width: 1536px; height: 864px; border-radius: 22px; overflow: hidden;
+  background: #fff; box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
+.cam { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
+.cam img { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
+.ring { position: absolute; border: 2px solid #6366f1; border-radius: 12px; box-shadow: 0 0 0 5px rgba(99,102,241,.16); opacity: 0; }
+.card { position: absolute; background: rgba(255,255,255,.97); border-radius: 22px; opacity: 0;
+  box-shadow: 0 30px 80px rgba(49,46,129,.18), 0 2px 8px rgba(24,24,27,.07); }
+.mono { font-family: "JetBrains Mono", monospace; }
+.pill { display: inline-flex; align-items: center; gap: 12px; border-radius: 999px; font-weight: 600; }
+.pill i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
+.browser { position: absolute; border-radius: 18px; overflow: hidden; background: #fff; opacity: 0;
+  box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
+.browser .bar { height: 58px; background: #ecebf3; display: flex; align-items: center; gap: 10px; padding: 0 22px; }
+.browser .bar b { width: 13px; height: 13px; border-radius: 50%; background: #cfcdd9; display: inline-block; }
+.browser .bar span { margin-left: 18px; background: #fff; border-radius: 999px; padding: 4px 22px; font-size: 28px; color: #52525b; }
+.browser .page { position: relative; overflow: hidden; }
+.browser .page img { position: absolute; left: 0; top: 0; }
+
+#how-title { position: absolute; left: 0; width: 1920px; top: 150px; text-align: center; font-size: 54px; font-weight: 680;
+  letter-spacing: -0.02em; opacity: 0; }
+.node { position: absolute; top: 300px; width: 370px; height: 320px; background: #fff; border-radius: 26px; padding: 34px 32px;
+  box-shadow: 0 24px 70px rgba(49,46,129,.14), 0 2px 8px rgba(24,24,27,.06); opacity: 0; }
+.node .n { display: flex; align-items: center; gap: 14px; font-size: 46px; font-weight: 720; letter-spacing: -0.02em; }
+.node .n i { width: 18px; height: 18px; border-radius: 50%; display: inline-block; }
+.node p { font-size: 28px; line-height: 1.3; color: #52525b; margin: 18px 0 0; }
+.node small { position: absolute; left: 32px; bottom: 26px; font-size: 28px; color: #6b6b75; }
+#how-svg { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: visible; }
+</style>
+  <div id="root" data-composition-id="how" data-width="1920" data-height="1080">
+    <div id="how-title">How it works</div>
+<div class="node" id="how-n0" style="left:145px"><div class="n"><i style="background:#3b82f6"></i>Learn</div><p>An OpenAI model writes the recipe, once</p><small>gpt-5-mini</small></div><div class="node" id="how-n1" style="left:565px"><div class="n"><i style="background:#10b981"></i>Read</div><p>Plain Python code, no model calls</p><small>every 15 minutes</small></div><div class="node" id="how-n2" style="left:985px"><div class="n"><i style="background:#6366f1"></i>Check</div><p>A health check after every read</p><small>tenders, files, IDs</small></div><div class="node" id="how-n3" style="left:1405px"><div class="n"><i style="background:#f59e0b"></i>Repair</div><p>The stronger model fixes the recipe</p><small>gpt-5</small></div>
+<svg id="how-svg" viewBox="0 0 1920 1080"><path id="how-a0" d="M523 450 L547 450" stroke="#6366f1" stroke-width="4" fill="none" stroke-linecap="round" stroke-dasharray="80" stroke-dashoffset="80"/><path id="how-h0" d="M535 439 L549 450 L535 461" stroke="#6366f1" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0"/><path id="how-a1" d="M943 450 L967 450" stroke="#6366f1" stroke-width="4" fill="none" stroke-linecap="round" stroke-dasharray="80" stroke-dashoffset="80"/><path id="how-h1" d="M955 439 L969 450 L955 461" stroke="#6366f1" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0"/><path id="how-a2" d="M1363 450 L1387 450" stroke="#6366f1" stroke-width="4" fill="none" stroke-linecap="round" stroke-dasharray="80" stroke-dashoffset="80"/><path id="how-h2" d="M1375 439 L1389 450 L1375 461" stroke="#6366f1" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0"/><path id="how-loop" d="M1590 628 C1590 740, 750 740, 750 634" stroke="#f59e0b" stroke-width="4" fill="none" stroke-linecap="round" stroke-dasharray="1400" stroke-dashoffset="1400"/><path id="how-loophead" d="M738 650 L750 634 L762 650" stroke="#f59e0b" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0"/><text id="how-looplabel" x="1170" y="760" text-anchor="middle" font-size="30" fill="#52525b" font-family="Mona Sans" opacity="0">when a portal changes</text></svg>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#how-title", {opacity: 0}, {opacity: 1, duration: 0.4, ease: "power2.out"}, 0.1);
+    tl.fromTo("#how-n0", {opacity: 0, y: 24}, {opacity: 1, y: 0, duration: .45, ease: "power3.out"}, 2.552);
+    tl.fromTo("#how-n1", {opacity: 0, y: 24}, {opacity: 1, y: 0, duration: .45, ease: "power3.out"}, 6.14);
+    tl.to("#how-a0", {strokeDashoffset: 0, duration: .35, ease: "power2.out"}, 5.9399999999999995);
+    tl.to("#how-h0", {opacity: 1, duration: .15}, 6.239999999999999);
+    tl.fromTo("#how-n2", {opacity: 0, y: 24}, {opacity: 1, y: 0, duration: .45, ease: "power3.out"}, 10.668);
+    tl.to("#how-a1", {strokeDashoffset: 0, duration: .35, ease: "power2.out"}, 10.468);
+    tl.to("#how-h1", {opacity: 1, duration: .15}, 10.767999999999999);
+    tl.fromTo("#how-n3", {opacity: 0, y: 24}, {opacity: 1, y: 0, duration: .45, ease: "power3.out"}, 13.512);
+    tl.to("#how-a2", {strokeDashoffset: 0, duration: .35, ease: "power2.out"}, 13.312000000000001);
+    tl.to("#how-h2", {opacity: 1, duration: .15}, 13.612);
+    tl.to("#how-loop", {strokeDashoffset: 0, duration: .8, ease: "power2.inOut"}, 15.463999999999999);
+    tl.to("#how-loophead", {opacity: 1, duration: .15}, 16.214);
+    tl.to("#how-looplabel", {opacity: 1, duration: .3}, 15.963999999999999);
+    window.__timelines["how"] = tl;
+  </script>
+</template>

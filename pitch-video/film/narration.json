@@ -1,0 +1,17 @@
+{
+  "note": "The voice-over, one entry per section. gap = silence (s) before the section. Edit text here, then re-run voice.py for that section only.",
+  "sections": [
+    {"id": "hook", "gap": 0.4, "text": "Public tenders are spread across countless portals. Every one of them looks different, and any of them can change overnight, without warning."},
+    {"id": "problem", "gap": 0.5, "text": "For a company like Patterno, that means a hand-written scraper for every portal. And scrapers break silently. When a portal changes its layout, the data just stops being right, and nobody notices until a client misses a deadline."},
+    {"id": "solution", "gap": 0.6, "text": "So we built Watchtower. You give it one thing: the address of a tender portal it has never seen. It learns how to read that portal once, reads it for free from then on, notices when something breaks, and repairs itself."},
+    {"id": "attach", "gap": 0.6, "text": "Here, we add a portal. Watchtower explores it, and the model writes a recipe: which rows are tenders, where the title, the buyer and the deadline are, and where the documents are. The recipe is tested on three tenders, and the portal turns green: serving."},
+    {"id": "docs", "gap": 0.4, "text": "Every tender comes with its documents. ZIP files are unpacked, and deadlines keep the portal's time zone."},
+    {"id": "repair", "gap": 0.9, "text": "Now we change the portal's layout on purpose. The next read fails its health check, so the portal goes to healing. The stronger model rewrites the recipe, version two passes, and we are serving again, with the same tender IDs."},
+    {"id": "captcha", "gap": 0.5, "text": "And when a portal puts up a captcha, Watchtower doesn't pretend. It says failed, and it tells you why."},
+    {"id": "how", "gap": 0.6, "text": "How it works, in four steps. First, an OpenAI model learns a recipe, once. Second, plain Python code reads with it, with no model calls. Third, a health check after every read. Fourth, when a portal changes, the model repairs the recipe."},
+    {"id": "real", "gap": 0.6, "text": "On real European portals, it tells you exactly which ones deliver, and for the others, exactly why not."},
+    {"id": "costs", "gap": 0.4, "text": "Learning a portal costs about one to two cents, a repair two to three cents, and a regular read costs nothing."},
+    {"id": "honest", "gap": 0.4, "text": "It's one Docker container, polite to every portal, and honest about what it delivers."},
+    {"id": "end", "gap": 0.5, "text": "We are TokenBurners, and this is Watchtower."}
+  ]
+}

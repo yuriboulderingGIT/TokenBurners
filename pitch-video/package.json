@@ -1,0 +1,8 @@
+{
+  "name": "watchtower-pitch-video",
+  "private": true,
+  "description": "Edit and render the Watchtower pitch video with the youtube-edit skill",
+  "devDependencies": {
+    "hyperframes": "0.9.22"
+  }
+}

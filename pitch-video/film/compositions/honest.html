@@ -1,0 +1,48 @@
+<template>
+  <style>
+@font-face { font-family: "Mona Sans"; src: url('assets/fonts/MonaSans-latin.woff2') format('woff2'); font-weight: 200 900; }
+#root { position: absolute; inset: 0; font-family: "Mona Sans", sans-serif; color: #18181b; }
+.win { position: absolute; left: 192px; top: 40px; width: 1536px; height: 864px; border-radius: 22px; overflow: hidden;
+  background: #fff; box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
+.cam { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
+.cam img { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
+.ring { position: absolute; border: 2px solid #6366f1; border-radius: 12px; box-shadow: 0 0 0 5px rgba(99,102,241,.16); opacity: 0; }
+.card { position: absolute; background: rgba(255,255,255,.97); border-radius: 22px; opacity: 0;
+  box-shadow: 0 30px 80px rgba(49,46,129,.18), 0 2px 8px rgba(24,24,27,.07); }
+.mono { font-family: "JetBrains Mono", monospace; }
+.pill { display: inline-flex; align-items: center; gap: 12px; border-radius: 999px; font-weight: 600; }
+.pill i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
+.browser { position: absolute; border-radius: 18px; overflow: hidden; background: #fff; opacity: 0;
+  box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
+.browser .bar { height: 58px; background: #ecebf3; display: flex; align-items: center; gap: 10px; padding: 0 22px; }
+.browser .bar b { width: 13px; height: 13px; border-radius: 50%; background: #cfcdd9; display: inline-block; }
+.browser .bar span { margin-left: 18px; background: #fff; border-radius: 999px; padding: 4px 22px; font-size: 28px; color: #52525b; }
+.browser .page { position: relative; overflow: hidden; }
+.browser .page img { position: absolute; left: 0; top: 0; }
+
+#honest-box { position: absolute; left: 330px; top: 170px; width: 1260px; height: 250px; border: 3px dashed #c7c4e6; border-radius: 30px;
+  opacity: 0; }
+#honest-box .cap { position: absolute; left: 40px; top: -24px; background: #f7f6fc; padding: 0 16px; font-size: 30px; font-weight: 650; }
+#honest-box .row { position: absolute; left: 40px; right: 40px; top: 74px; display: flex; gap: 18px; justify-content: center; }
+#honest-box .row span { background: #fff; border-radius: 16px; padding: 22px 28px; font-size: 30px; font-weight: 600;
+  box-shadow: 0 12px 34px rgba(49,46,129,.10); }
+#honest-polite { position: absolute; left: 0; width: 1920px; top: 470px; text-align: center; font-size: 36px; color: #52525b; opacity: 0; }
+#honest-states { position: absolute; left: 0; width: 1920px; top: 590px; display: flex; justify-content: center; gap: 26px; }
+.state { display: inline-flex; align-items: center; gap: 16px; border-radius: 999px; padding: 22px 40px; font-size: 40px; font-weight: 650; opacity: 0; }
+.state i { width: 18px; height: 18px; border-radius: 50%; display: inline-block; }
+</style>
+  <div id="root" data-composition-id="honest" data-width="1920" data-height="1080">
+    <div id="honest-box"><div class="cap">One Docker container</div><div class="row"><span>FastAPI</span><span>Dashboard</span><span>Reader + health check</span><span>SQLite</span><span>Playwright</span></div></div>
+<div id="honest-polite">About one request per second to any portal</div>
+<div id="honest-states"><div class="state" id="honest-s0" style="background:#ecfdf5;color:#047857"><i style="background:#10b981"></i>serving</div><div class="state" id="honest-s1" style="background:#fffbeb;color:#b45309"><i style="background:#f59e0b"></i>healing</div><div class="state" id="honest-s2" style="background:#fef2f2;color:#b91c1c"><i style="background:#ef4444"></i>failed</div></div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#honest-box", {opacity: 0, x: 0, y: 24}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 0.546);
+    tl.fromTo("#honest-polite", {opacity: 0}, {opacity: 1, duration: 0.4, ease: "power2.out"}, 1.728);
+    tl.fromTo("#honest-s0", {opacity: 0, y: 18, scale: .95}, {opacity: 1, y: 0, scale: 1, duration: .4, ease: "back.out(1.5)"}, 3.37);
+    tl.fromTo("#honest-s1", {opacity: 0, y: 18, scale: .95}, {opacity: 1, y: 0, scale: 1, duration: .4, ease: "back.out(1.5)"}, 3.55);
+    tl.fromTo("#honest-s2", {opacity: 0, y: 18, scale: .95}, {opacity: 1, y: 0, scale: 1, duration: .4, ease: "back.out(1.5)"}, 3.73);
+    window.__timelines["honest"] = tl;
+  </script>
+</template>

@@ -1,0 +1,49 @@
+<template>
+  <style>
+@font-face { font-family: "Mona Sans"; src: url('assets/fonts/MonaSans-latin.woff2') format('woff2'); font-weight: 200 900; }
+#root { position: absolute; inset: 0; font-family: "Mona Sans", sans-serif; color: #18181b; }
+.win { position: absolute; left: 192px; top: 40px; width: 1536px; height: 864px; border-radius: 22px; overflow: hidden;
+  background: #fff; box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
+.cam { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
+.cam img { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
+.ring { position: absolute; border: 2px solid #6366f1; border-radius: 12px; box-shadow: 0 0 0 5px rgba(99,102,241,.16); opacity: 0; }
+.card { position: absolute; background: rgba(255,255,255,.97); border-radius: 22px; opacity: 0;
+  box-shadow: 0 30px 80px rgba(49,46,129,.18), 0 2px 8px rgba(24,24,27,.07); }
+.mono { font-family: "JetBrains Mono", monospace; }
+.pill { display: inline-flex; align-items: center; gap: 12px; border-radius: 999px; font-weight: 600; }
+.pill i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
+.browser { position: absolute; border-radius: 18px; overflow: hidden; background: #fff; opacity: 0;
+  box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
+.browser .bar { height: 58px; background: #ecebf3; display: flex; align-items: center; gap: 10px; padding: 0 22px; }
+.browser .bar b { width: 13px; height: 13px; border-radius: 50%; background: #cfcdd9; display: inline-block; }
+.browser .bar span { margin-left: 18px; background: #fff; border-radius: 999px; padding: 4px 22px; font-size: 28px; color: #52525b; }
+.browser .page { position: relative; overflow: hidden; }
+.browser .page img { position: absolute; left: 0; top: 0; }
+
+#solution-mask { position: absolute; left: 0; width: 1920px; top: 250px; height: 220px; overflow: hidden; text-align: center; }
+#solution-word { font-size: 176px; font-weight: 720; letter-spacing: -0.04em; line-height: 220px; }
+#solution-field { position: absolute; left: 460px; top: 520px; width: 1000px; height: 92px; border-radius: 999px; background: #fff;
+  box-shadow: 0 20px 60px rgba(49,46,129,.14); display: flex; align-items: center; padding: 0 12px 0 40px; opacity: 0; }
+#solution-field span { flex: 1; font-size: 32px; color: #6b6b75; }
+#solution-field b { background: #18181b; color: #fff; border-radius: 999px; padding: 18px 34px; font-size: 28px; font-weight: 600; }
+#solution-chips { position: absolute; left: 0; width: 1920px; top: 690px; display: flex; justify-content: center; gap: 22px; }
+.chip { display: inline-flex; align-items: center; gap: 14px; background: #fff; border-radius: 999px; padding: 18px 30px;
+  font-size: 32px; font-weight: 600; box-shadow: 0 14px 40px rgba(49,46,129,.12); opacity: 0; }
+.chip i { width: 16px; height: 16px; border-radius: 50%; display: inline-block; }
+</style>
+  <div id="root" data-composition-id="solution" data-width="1920" data-height="1080">
+    <div id="solution-mask"><div id="solution-word">Watchtower</div></div>
+<div id="solution-field"><span>Portal address, e.g. https://…/tenders</span><b>Add portal</b></div>
+<div id="solution-chips"><div class="chip" id="solution-c0"><i style="background:#3b82f6"></i>Learns once</div><div class="chip" id="solution-c1"><i style="background:#10b981"></i>Reads for free</div><div class="chip" id="solution-c2"><i style="background:#f59e0b"></i>Notices breaks</div><div class="chip" id="solution-c3"><i style="background:#6d4fd8"></i>Repairs itself</div></div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#solution-word", {yPercent: 105}, {yPercent: 0, duration: .8, ease: "power4.out"}, 0.589);
+    tl.fromTo("#solution-field", {opacity: 0, x: 0, y: 24}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 2.262);
+    tl.fromTo("#solution-c0", {opacity: 0, y: 20, scale: .94}, {opacity: 1, y: 0, scale: 1, duration: .4, ease: "back.out(1.6)"}, 6.535);
+    tl.fromTo("#solution-c1", {opacity: 0, y: 20, scale: .94}, {opacity: 1, y: 0, scale: 1, duration: .4, ease: "back.out(1.6)"}, 8.508);
+    tl.fromTo("#solution-c2", {opacity: 0, y: 20, scale: .94}, {opacity: 1, y: 0, scale: 1, duration: .4, ease: "back.out(1.6)"}, 10.494);
+    tl.fromTo("#solution-c3", {opacity: 0, y: 20, scale: .94}, {opacity: 1, y: 0, scale: 1, duration: .4, ease: "back.out(1.6)"}, 12.293);
+    window.__timelines["solution"] = tl;
+  </script>
+</template>

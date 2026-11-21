@@ -1,0 +1,66 @@
+{
+ "voice": "JBFqnCBsd6RMkjVDRZzb",
+ "total": 125.518,
+ "sections": [
+  {
+   "id": "hook",
+   "start": 0.4,
+   "end": 8.573
+  },
+  {
+   "id": "problem",
+   "start": 9.073,
+   "end": 22.587
+  },
+  {
+   "id": "solution",
+   "start": 23.187,
+   "end": 36.655
+  },
+  {
+   "id": "attach",
+   "start": 37.255,
+   "end": 53.927
+  },
+  {
+   "id": "docs",
+   "start": 54.327,
+   "end": 61.107
+  },
+  {
+   "id": "repair",
+   "start": 62.007,
+   "end": 76.822
+  },
+  {
+   "id": "captcha",
+   "start": 77.322,
+   "end": 84.195
+  },
+  {
+   "id": "how",
+   "start": 84.795,
+   "end": 101.885
+  },
+  {
+   "id": "real",
+   "start": 102.485,
+   "end": 109.451
+  },
+  {
+   "id": "costs",
+   "start": 109.851,
+   "end": 117.049
+  },
+  {
+   "id": "honest",
+   "start": 117.449,
+   "end": 122.418
+  },
+  {
+   "id": "end",
+   "start": 122.918,
+   "end": 125.518
+  }
+ ]
+}
