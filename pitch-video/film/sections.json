@@ -1,66 +1,66 @@
 {
  "voice": "JBFqnCBsd6RMkjVDRZzb",
- "total": 125.518,
+ "total": 124.374,
  "sections": [
   {
    "id": "hook",
-   "start": 0.4,
-   "end": 8.573
+   "start": 1.3,
+   "end": 9.283
   },
   {
    "id": "problem",
-   "start": 9.073,
-   "end": 22.587
+   "start": 9.783,
+   "end": 23.291
   },
   {
    "id": "solution",
-   "start": 23.187,
-   "end": 36.655
+   "start": 23.891,
+   "end": 37.163
   },
   {
    "id": "attach",
-   "start": 37.255,
-   "end": 53.927
+   "start": 37.763,
+   "end": 54.379
   },
   {
    "id": "docs",
-   "start": 54.327,
-   "end": 61.107
+   "start": 54.779,
+   "end": 61.294
   },
   {
    "id": "repair",
-   "start": 62.007,
-   "end": 76.822
+   "start": 62.194,
+   "end": 76.749
   },
   {
    "id": "captcha",
-   "start": 77.322,
-   "end": 84.195
+   "start": 77.249,
+   "end": 83.77
   },
   {
    "id": "how",
-   "start": 84.795,
-   "end": 101.885
+   "start": 84.37,
+   "end": 101.275
   },
   {
    "id": "real",
-   "start": 102.485,
-   "end": 109.451
+   "start": 101.875,
+   "end": 108.57
   },
   {
    "id": "costs",
-   "start": 109.851,
-   "end": 117.049
+   "start": 108.97,
+   "end": 116.001
   },
   {
    "id": "honest",
-   "start": 117.449,
-   "end": 122.418
+   "start": 116.401,
+   "end": 121.273
   },
   {
    "id": "end",
-   "start": 122.918,
-   "end": 125.518
+   "start": 121.773,
+   "end": 124.374
   }
  ]
 }

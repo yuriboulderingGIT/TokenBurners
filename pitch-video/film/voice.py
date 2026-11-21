@@ -21,6 +21,8 @@ HERE = Path(__file__).resolve().parent
 PV = HERE.parent
 VOICE_ID = sys.argv[1]
 ASSEMBLE_ONLY = "--assemble" in sys.argv
+# --stability 0.6 gives a steadier, calmer read (ElevenLabs default 0.5); used only when a section is generated
+STABILITY = float(sys.argv[sys.argv.index("--stability") + 1]) if "--stability" in sys.argv else 0.5
 MODEL = "eleven_multilingual_v2"
 FFMPEG = shutil.which("ffmpeg") or str(next(Path.home().glob(
     "AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg*/*/bin/ffmpeg.exe")))
@@ -44,7 +46,7 @@ def generate(i: int, sec: dict) -> dict:
     if ASSEMBLE_ONLY:
         raise SystemExit(f"section {sec['id']} is not generated yet")
     body = {"text": sec["text"], "model_id": MODEL,
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "style": 0.0, "use_speaker_boost": True}}
+            "voice_settings": {"stability": STABILITY, "similarity_boost": 0.75, "style": 0.0, "use_speaker_boost": True}}
     if i > 0:
         body["previous_text"] = sections[i - 1]["text"]
     if i + 1 < len(sections):
@@ -93,14 +95,27 @@ def duration(path: Path) -> float:
 
 metas = [generate(i, sec) for i, sec in enumerate(sections)]
 
+# Each section is cut to its words: from just before the first word to TAIL_KEEP after the last one, with a short
+# fade. ElevenLabs sometimes ends a clip with a stray "mm" (the start of the next sentence) about half a second
+# after the last word; the cut removes it.
+LEAD_KEEP, TAIL_KEEP, FADE = 0.04, 0.35, 0.12
+
 # Assemble: gap of silence before each section, then the section (decoded to 48 kHz mono WAV).
 work = PV / "voice" / "work"
 work.mkdir(parents=True, exist_ok=True)
 t, words, spans, parts = 0.0, [], [], []
 for sec, meta in zip(sections, metas):
     wav = work / f"{sec['id']}.wav"
-    subprocess.run([FFMPEG, "-y", "-v", "error", "-i", str(CACHE / f"{sec['id']}.mp3"), "-ar", "48000", "-ac", "1", str(wav)],
+    full = work / f"{sec['id']}-full.wav"
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-i", str(CACHE / f"{sec['id']}.mp3"), "-ar", "48000", "-ac", "1", str(full)],
                    check=True)
+    spoken = [(s, e) for c, s, e in zip(meta["chars"], meta["starts"], meta["ends"]) if not c.isspace()]
+    cut_in = max(0.0, spoken[0][0] - LEAD_KEEP)
+    cut_out = min(duration(full), max(e for _, e in spoken) + TAIL_KEEP)
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-i", str(full), "-af",
+                    f"atrim=start={cut_in:.3f}:end={cut_out:.3f},asetpts=PTS-STARTPTS,"
+                    f"afade=t=out:st={cut_out - cut_in - FADE:.3f}:d={FADE}", str(wav)], check=True)
+    meta = {**meta, "starts": [s - cut_in for s in meta["starts"]], "ends": [e - cut_in for e in meta["ends"]]}
     gap = work / f"gap-{sec['id']}.wav"
     subprocess.run([FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", f"{sec['gap']:.3f}",
                     str(gap)], check=True)

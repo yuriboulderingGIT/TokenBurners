@@ -4,10 +4,14 @@ All page stills are 3840x2160 captures (1280x720 CSS at 3x); film copies are 320
 region in build.py is given in the 3840x2160 capture's pixels.
 """
 
+import json
+import re
 import shutil
+import subprocess
 from pathlib import Path
 
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageEnhance
 
 HERE = Path(__file__).resolve().parent
 CAP = HERE.parent / "capture"
@@ -33,10 +37,10 @@ for name, rel in STILLS.items():
     assert im.size == (3840, 2160), (rel, im.size)
     im.resize((3200, 1800), Image.LANCZOS).save(IMG / f"{name}.jpg", quality=90)
 
-CROPS = {  # name: (source, box in capture pixels)
-    "mock-v1": ("repair/mock-v1.png", (0, 0, 1400, 880)),
-    "mock-v2": ("repair/mock-v2.png", (0, 0, 1400, 880)),
-    "mock-captcha": ("captcha/mock-captcha.png", (0, 0, 1700, 1069)),
+CROPS = {  # name: (source, box in capture pixels); mock pages are 16:9 so they can fill the frame
+    "mock-v1": ("repair/mock-v1.png", (0, 0, 1500, 845)),
+    "mock-v2": ("repair/mock-v2.png", (0, 0, 1500, 845)),
+    "mock-captcha": ("captcha/mock-captcha.png", (0, 0, 1500, 845)),
     "activity": ("captcha/03-dashboard-after.png", (2600, 860, 3840, 2160)),
 }
 for name, (rel, box) in CROPS.items():
@@ -50,11 +54,46 @@ for i, f in enumerate(frames):
     Image.open(f).convert("RGB").crop(TYPE_BOX).save(IMG / "typing" / f"{i:02d}.jpg", quality=92)
 
 for f in sorted((CAP / "portals").glob("*.png")):
-    Image.open(f).convert("RGB").resize((1440, 900), Image.LANCZOS).save(IMG / f"portal-{f.stem}.jpg", quality=88)
+    tile = Image.open(f).convert("RGB").resize((1440, 900), Image.LANCZOS)
+    # v3: a gentle calm-down of the busy government sites (less saturated, slightly softer contrast)
+    tile = ImageEnhance.Contrast(ImageEnhance.Color(tile).enhance(0.72)).enhance(0.94)
+    tile.save(IMG / f"portal-{f.stem}.jpg", quality=88)
 
 LIB = Path.home() / ".claude" / "skills" / "media-use" / "audio" / "assets" / "sfx"
-for name in ("click.mp3", "click-soft.mp3", "pop.mp3", "whoosh.mp3", "whoosh-short.mp3", "whoosh-cinematic.mp3",
-             "glitch-1.mp3", "glitch-2.mp3", "typing.mp3", "key-press.mp3", "riser.mp3", "impact-bass-1.mp3",
-             "CREDITS.md"):
-    shutil.copy2(LIB / name, SFX / name)
-print("stills", len(STILLS), "crops", len(CROPS), "typing", len(frames), "sfx ok")
+if LIB.exists():
+    for name in ("click.mp3", "click-soft.mp3", "pop.mp3", "whoosh.mp3", "whoosh-short.mp3", "whoosh-cinematic.mp3",
+                 "glitch-1.mp3", "glitch-2.mp3", "typing.mp3", "key-press.mp3", "riser.mp3", "impact-bass-1.mp3",
+                 "CREDITS.md"):
+        shutil.copy2(LIB / name, SFX / name)
+
+# Softer copies: tame the harsh highs (-7 dB shelf above 4 kHz) and level every peak to -6 dBFS,
+# so data-volume alone sets how loud each sound sits under the voice.
+FFMPEG = shutil.which("ffmpeg") or str(next(Path.home().glob(
+    "AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg*/*/bin/ffmpeg.exe")))
+(SFX / "soft").mkdir(exist_ok=True)
+for src in SFX.glob("*.mp3"):
+    tmp = SFX / "soft" / f"{src.stem}.wav"
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-i", str(src), "-af", "highshelf=f=4000:g=-7,lowpass=f=11000",
+                    "-ar", "48000", str(tmp)], check=True)
+    peak = re.search(r"max_volume: (-?[\d.]+) dB", subprocess.run(
+        [FFMPEG, "-v", "info", "-i", str(tmp), "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True).stderr)
+    gain = -6.0 - float(peak.group(1)) if peak else 0.0
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-i", str(tmp), "-af", f"volume={gain:.2f}dB", "-b:a", "192k",
+                    str(SFX / "soft" / src.name)], check=True)
+    tmp.unlink()
+
+# The status pill on each page, measured from the pixels (its tint), so a highlight fits it exactly.
+PILL_SOURCES = {"integrating-a.jpg": "attach/burst/0032.jpg", "integrating-b.jpg": "attach/burst/0044.jpg",
+                "serving.jpg": "attach/03-portal-after.png", "healing.jpg": "repair/burst/0015.jpg",
+                "repaired.jpg": "repair/02-portal-after.png", "failed.jpg": "captcha/02-portal-after.png",
+                "ezak.jpg": "realruns/ezak-run3.png"}
+pills = {}
+for name, rel in PILL_SOURCES.items():
+    px = np.asarray(Image.open(CAP / rel).convert("RGB")).astype(int)
+    x0, y0 = 560, 460
+    crop = px[y0:620, x0:1500]
+    ys, xs = np.nonzero((crop.max(axis=2) - crop.min(axis=2)) > 18)
+    pills[name] = [int(x0 + xs.min()), int(y0 + ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)]
+(HERE / "pills.json").write_text(json.dumps(pills, indent=1), encoding="utf-8")
+print("stills", len(STILLS), "crops", len(CROPS), "typing", len(frames), "sfx ok, pills", pills)

@@ -2,11 +2,19 @@
   <style>
 @font-face { font-family: "Mona Sans"; src: url('assets/fonts/MonaSans-latin.woff2') format('woff2'); font-weight: 200 900; }
 #root { position: absolute; inset: 0; font-family: "Mona Sans", sans-serif; color: #18181b; }
-.win { position: absolute; left: 192px; top: 40px; width: 1536px; height: 864px; border-radius: 22px; overflow: hidden;
-  background: #fff; box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
-.cam { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
-.cam img { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
-.ring { position: absolute; border: 2px solid #6366f1; border-radius: 12px; box-shadow: 0 0 0 5px rgba(99,102,241,.16); opacity: 0; }
+.win { position: absolute; left: 0px; top: 0px; width: 1920px; height: 1080px; overflow: hidden; background: #f7f6fc; }
+.cam { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+.cam img { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+.scrim { position: absolute; left: 0; right: 0; bottom: 0; height: 250px; pointer-events: none;
+  background: linear-gradient(to bottom, rgba(249,248,253,0) 0%, rgba(249,248,253,.80) 52%, rgba(249,248,253,.96) 100%); }
+.hl { position: absolute; opacity: 0; }
+.hl.mark { mix-blend-mode: multiply; }
+.full { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; background: #fff; opacity: 0; }
+.full .bar { height: 64px; background: #ecebf3; display: flex; align-items: center; gap: 10px; padding: 0 28px; }
+.full .bar b { width: 14px; height: 14px; border-radius: 50%; background: #cfcdd9; display: inline-block; }
+.full .bar span { margin-left: 20px; background: #fff; border-radius: 999px; padding: 4px 26px; font-size: 28px; color: #52525b; }
+.full .page { position: absolute; left: 0; top: 64px; width: 1920px; height: 1016px; overflow: hidden; }
+.full .page img { position: absolute; left: 120px; top: 44px; width: 1300px; height: 732px; }   /* v3: calmer size, with margins */
 .card { position: absolute; background: rgba(255,255,255,.97); border-radius: 22px; opacity: 0;
   box-shadow: 0 30px 80px rgba(49,46,129,.18), 0 2px 8px rgba(24,24,27,.07); }
 .mono { font-family: "JetBrains Mono", monospace; }
@@ -20,9 +28,16 @@
 .browser .page { position: relative; overflow: hidden; }
 .browser .page img { position: absolute; left: 0; top: 0; }
 
-.line { position: absolute; left: 200px; width: 760px; font-size: 58px; font-weight: 650; letter-spacing: -0.02em;
+.line { position: absolute; left: 170px; width: 760px; font-size: 58px; font-weight: 650; letter-spacing: -0.02em;
   line-height: 1.12; opacity: 0; }
-#problem-code { left: 1040px; top: 640px; width: 700px; padding: 26px 30px; }
+#problem-code { left: 980px; top: 620px; width: 800px; padding: 26px 30px; }
+.browser { position: absolute; border-radius: 18px; overflow: hidden; background: #fff; opacity: 0;
+  box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
+.browser .bar { height: 58px; background: #ecebf3; display: flex; align-items: center; gap: 10px; padding: 0 22px; }
+.browser .bar b { width: 13px; height: 13px; border-radius: 50%; background: #cfcdd9; display: inline-block; }
+.browser .bar span { margin-left: 18px; background: #fff; border-radius: 999px; padding: 4px 22px; font-size: 28px; color: #52525b; }
+.browser .page { position: relative; overflow: hidden; }
+.browser .page img { position: absolute; left: 0; top: 0; }
 #problem-code .file { font-size: 28px; color: #6b6b75; margin-bottom: 10px; }
 #problem-code .row { font-size: 28px; line-height: 1.6; color: #18181b; white-space: nowrap; }
 #problem-code .row em { font-style: normal; color: #6b6b75; display: inline-block; width: 160px; }
@@ -33,24 +48,24 @@
     <div class="line" id="problem-l1" style="top:240px">A hand-written scraper for every portal.</div>
 <div class="line" id="problem-l2" style="top:430px">Scrapers break silently.</div>
 <div class="line" id="problem-l3" style="top:560px;color:#52525b;font-weight:550">Nobody notices until a deadline is missed.</div>
-<div class="browser" id="problem-br" style="left:1040px;top:110px;width:700px;height:500px"><div class="bar"><b></b><b></b><b></b><span>localhost:8090/tenders</span></div><div class="page" style="width:700px;height:442px"><img id="problem-v1" src="assets/img/mock-v1.jpg" style="width:700px;height:440px" alt=""><img id="problem-v2" src="assets/img/mock-v2.jpg" style="width:700px;height:440px;opacity:0" alt=""></div></div>
+<div class="browser" id="problem-br" style="left:980px;top:80px;width:800px;height:509px"><div class="bar"><b></b><b></b><b></b><span>localhost:8090/tenders</span></div><div class="page" style="width:800px;height:451px"><img id="problem-v1" src="assets/img/mock-v1.jpg" style="width:800px;height:451px" alt=""><img id="problem-v2" src="assets/img/mock-v2.jpg" style="width:800px;height:451px;opacity:0" alt=""></div></div>
 <div class="card mono" id="problem-code"><div class="file">scraper.py</div><div class="row"><em>rows</em><span class="sel">//table[@id='results']/tr</span></div><div class="row"><em>title</em><span class="sel">//h1</span></div><div class="row"><em>deadline</em><span class="sel">dt['Submission deadline']</span></div><div id="problem-zero">0 tenders found</div></div>
   </div>
   <script>
     const tl = gsap.timeline({ paused: true });
-    tl.fromTo("#problem-br", {opacity: 0, x: 0, y: 30}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 1.9409999999999998);
-    tl.fromTo("#problem-code", {opacity: 0, x: 0, y: 30}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 2.541);
-    tl.fromTo("#problem-l1", {opacity: 0, x: -30, y: 0}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 2.541);
-    tl.fromTo("#problem-l2", {opacity: 0, x: -30, y: 0}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 5.722);
-    tl.set("#problem-v2", {opacity: 1}, 7.992);
-    tl.set("#problem-v1", {opacity: 0}, 7.992);
-    tl.to("#problem-br", {x: 9, duration: .045, ease: "none"}, 7.942);
-    tl.to("#problem-br", {x: -7, duration: .045, ease: "none"}, 7.987);
-    tl.to("#problem-br", {x: 5, duration: .045, ease: "none"}, 8.032);
-    tl.to("#problem-br", {x: 0, duration: .045, ease: "none"}, 8.077);
-    tl.to("#problem-code .sel", {color: "#ef4444", duration: .3}, 8.342);
-    tl.fromTo("#problem-zero", {opacity: 0, y: 8}, {opacity: 1, y: 0, duration: .35, ease: "power2.out"}, 9.658);
-    tl.fromTo("#problem-l3", {opacity: 0, x: -30, y: 0}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 10.993);
+    tl.fromTo("#problem-br", {opacity: 0, x: 0, y: 30}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 0.05);
+    tl.fromTo("#problem-code", {opacity: 0, x: 0, y: 30}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 0.3);
+    tl.fromTo("#problem-l1", {opacity: 0, x: -30, y: 0}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 2.535);
+    tl.fromTo("#problem-l2", {opacity: 0, x: -30, y: 0}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 5.716);
+    tl.set("#problem-v2", {opacity: 1}, 7.986);
+    tl.set("#problem-v1", {opacity: 0}, 7.986);
+    tl.to("#problem-br", {x: 9, duration: .045, ease: "none"}, 7.936);
+    tl.to("#problem-br", {x: -7, duration: .045, ease: "none"}, 7.981);
+    tl.to("#problem-br", {x: 5, duration: .045, ease: "none"}, 8.026);
+    tl.to("#problem-br", {x: 0, duration: .045, ease: "none"}, 8.071);
+    tl.to("#problem-code .sel", {color: "#ef4444", duration: .3}, 8.336);
+    tl.fromTo("#problem-zero", {opacity: 0, y: 8}, {opacity: 1, y: 0, duration: .35, ease: "power2.out"}, 9.652);
+    tl.fromTo("#problem-l3", {opacity: 0, x: -30, y: 0}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 10.987);
     window.__timelines["problem"] = tl;
   </script>
 </template>

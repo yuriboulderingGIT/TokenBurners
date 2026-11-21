@@ -41,7 +41,12 @@ A render takes about 4 minutes on a laptop.
 Edit `film/narration.json`, then `python voice.py <voice_id>`: only changed sections are bought again
 (the full script is about 1,500 credits). `build.py` finds every cue by its spoken word (for example the
 recipe card appears on "recipe"), so the edit follows the new timing; if a cue word is removed, the build
-stops and names it. The first cut uses the voice `JBFqnCBsd6RMkjVDRZzb` (George).
+stops and names it. Each section is cut 0.35 s after its last word, which removes the stray "mm" ElevenLabs
+sometimes leaves at the end of a clip.
+
+The submitted video (v3) uses George, `JBFqnCBsd6RMkjVDRZzb`. A calmer female read was made with Sarah:
+`python voice.py EXAVITQu4vr4xnSDxMaL --stability 0.6`. Switching back to a voice that is already cached
+costs nothing: `python voice.py <voice_id> --assemble`, then `python build.py`.
 
 ## Shoot the demo again
 

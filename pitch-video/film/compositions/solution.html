@@ -2,11 +2,19 @@
   <style>
 @font-face { font-family: "Mona Sans"; src: url('assets/fonts/MonaSans-latin.woff2') format('woff2'); font-weight: 200 900; }
 #root { position: absolute; inset: 0; font-family: "Mona Sans", sans-serif; color: #18181b; }
-.win { position: absolute; left: 192px; top: 40px; width: 1536px; height: 864px; border-radius: 22px; overflow: hidden;
-  background: #fff; box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
-.cam { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
-.cam img { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
-.ring { position: absolute; border: 2px solid #6366f1; border-radius: 12px; box-shadow: 0 0 0 5px rgba(99,102,241,.16); opacity: 0; }
+.win { position: absolute; left: 0px; top: 0px; width: 1920px; height: 1080px; overflow: hidden; background: #f7f6fc; }
+.cam { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+.cam img { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+.scrim { position: absolute; left: 0; right: 0; bottom: 0; height: 250px; pointer-events: none;
+  background: linear-gradient(to bottom, rgba(249,248,253,0) 0%, rgba(249,248,253,.80) 52%, rgba(249,248,253,.96) 100%); }
+.hl { position: absolute; opacity: 0; }
+.hl.mark { mix-blend-mode: multiply; }
+.full { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; background: #fff; opacity: 0; }
+.full .bar { height: 64px; background: #ecebf3; display: flex; align-items: center; gap: 10px; padding: 0 28px; }
+.full .bar b { width: 14px; height: 14px; border-radius: 50%; background: #cfcdd9; display: inline-block; }
+.full .bar span { margin-left: 20px; background: #fff; border-radius: 999px; padding: 4px 26px; font-size: 28px; color: #52525b; }
+.full .page { position: absolute; left: 0; top: 64px; width: 1920px; height: 1016px; overflow: hidden; }
+.full .page img { position: absolute; left: 120px; top: 44px; width: 1300px; height: 732px; }   /* v3: calmer size, with margins */
 .card { position: absolute; background: rgba(255,255,255,.97); border-radius: 22px; opacity: 0;
   box-shadow: 0 30px 80px rgba(49,46,129,.18), 0 2px 8px rgba(24,24,27,.07); }
 .mono { font-family: "JetBrains Mono", monospace; }
@@ -38,7 +46,7 @@
   </div>
   <script>
     const tl = gsap.timeline({ paused: true });
-    tl.fromTo("#solution-word", {yPercent: 105}, {yPercent: 0, duration: .8, ease: "power4.out"}, 0.589);
+    tl.fromTo("#solution-word", {yPercent: 105}, {yPercent: 0, duration: .8, ease: "power4.out"}, 0.2);
     tl.fromTo("#solution-field", {opacity: 0, x: 0, y: 24}, {opacity: 1, x: 0, y: 0, duration: 0.5, ease: "power3.out"}, 2.262);
     tl.fromTo("#solution-c0", {opacity: 0, y: 20, scale: .94}, {opacity: 1, y: 0, scale: 1, duration: .4, ease: "back.out(1.6)"}, 6.535);
     tl.fromTo("#solution-c1", {opacity: 0, y: 20, scale: .94}, {opacity: 1, y: 0, scale: 1, duration: .4, ease: "back.out(1.6)"}, 8.508);

@@ -2,11 +2,19 @@
   <style>
 @font-face { font-family: "Mona Sans"; src: url('assets/fonts/MonaSans-latin.woff2') format('woff2'); font-weight: 200 900; }
 #root { position: absolute; inset: 0; font-family: "Mona Sans", sans-serif; color: #18181b; }
-.win { position: absolute; left: 192px; top: 40px; width: 1536px; height: 864px; border-radius: 22px; overflow: hidden;
-  background: #fff; box-shadow: 0 34px 90px rgba(49,46,129,.16), 0 3px 10px rgba(24,24,27,.06); }
-.cam { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
-.cam img { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; }
-.ring { position: absolute; border: 2px solid #6366f1; border-radius: 12px; box-shadow: 0 0 0 5px rgba(99,102,241,.16); opacity: 0; }
+.win { position: absolute; left: 0px; top: 0px; width: 1920px; height: 1080px; overflow: hidden; background: #f7f6fc; }
+.cam { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+.cam img { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+.scrim { position: absolute; left: 0; right: 0; bottom: 0; height: 250px; pointer-events: none;
+  background: linear-gradient(to bottom, rgba(249,248,253,0) 0%, rgba(249,248,253,.80) 52%, rgba(249,248,253,.96) 100%); }
+.hl { position: absolute; opacity: 0; }
+.hl.mark { mix-blend-mode: multiply; }
+.full { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; background: #fff; opacity: 0; }
+.full .bar { height: 64px; background: #ecebf3; display: flex; align-items: center; gap: 10px; padding: 0 28px; }
+.full .bar b { width: 14px; height: 14px; border-radius: 50%; background: #cfcdd9; display: inline-block; }
+.full .bar span { margin-left: 20px; background: #fff; border-radius: 999px; padding: 4px 26px; font-size: 28px; color: #52525b; }
+.full .page { position: absolute; left: 0; top: 64px; width: 1920px; height: 1016px; overflow: hidden; }
+.full .page img { position: absolute; left: 120px; top: 44px; width: 1300px; height: 732px; }   /* v3: calmer size, with margins */
 .card { position: absolute; background: rgba(255,255,255,.97); border-radius: 22px; opacity: 0;
   box-shadow: 0 30px 80px rgba(49,46,129,.18), 0 2px 8px rgba(24,24,27,.07); }
 .mono { font-family: "JetBrains Mono", monospace; }
@@ -20,25 +28,22 @@
 .browser .page { position: relative; overflow: hidden; }
 .browser .page img { position: absolute; left: 0; top: 0; }
 
-#hook-grid { position: absolute; inset: 0; }
-.tile { position: absolute; width: 384px; opacity: 0; }
-.tile .shot { width: 384px; height: 240px; border-radius: 16px; overflow: hidden; background: #fff;
-  box-shadow: 0 20px 50px rgba(49,46,129,.14), 0 2px 6px rgba(24,24,27,.06); }
-.tile img { width: 384px; height: 240px; display: block; }
-.tile .lab { margin-top: 12px; font-size: 28px; font-weight: 550; color: #52525b; text-align: center; white-space: nowrap; }
+#hook-grid { position: absolute; inset: 0; opacity: 0; }
+.tile { position: absolute; width: 568px; }
+.tile .shot { width: 568px; height: 355px; border-radius: 18px; overflow: hidden; background: #fff;
+  box-shadow: 0 24px 60px rgba(49,46,129,.14), 0 2px 6px rgba(24,24,27,.06); }
+.tile img { width: 568px; height: 355px; display: block; }
+.tile .lab { margin-top: 14px; font-size: 28px; font-weight: 550; color: #52525b; text-align: center; }
 </style>
   <div id="root" data-composition-id="hook" data-width="1920" data-height="1080">
-    <div id="hook-grid"><div class="tile" id="hook-t0" style="left:147px;top:150px;opacity:1"><div class="shot"><img src="assets/img/portal-cy-eprocurement.jpg" alt=""></div><div class="lab">eprocurement.gov.cy</div></div><div class="tile" id="hook-t1" style="left:561px;top:150px;opacity:1"><div class="shot"><img src="assets/img/portal-de-dtvp.jpg" alt=""></div><div class="lab">dtvp.de</div></div><div class="tile" id="hook-t2" style="left:975px;top:150px;opacity:1"><div class="shot"><img src="assets/img/portal-de-nrw.jpg" alt=""></div><div class="lab">evergabe.nrw.de</div></div><div class="tile" id="hook-t3" style="left:1389px;top:150px;opacity:1"><div class="shot"><img src="assets/img/portal-fr-place.jpg" alt=""></div><div class="lab">marches-publics.gouv.fr</div></div><div class="tile" id="hook-t4" style="left:147px;top:484px;opacity:1"><div class="shot"><img src="assets/img/portal-gb-sell2wales.jpg" alt=""></div><div class="lab">sell2wales.gov.wales</div></div><div class="tile" id="hook-t5" style="left:561px;top:484px;opacity:1"><div class="shot"><img src="assets/img/portal-ie-etenders.jpg" alt=""></div><div class="lab">etenders.gov.ie</div></div><div class="tile" id="hook-t6" style="left:975px;top:484px;opacity:1"><div class="shot"><img src="assets/img/portal-mt-etenders.jpg" alt=""></div><div class="lab">etenders.gov.mt</div></div><div class="tile" id="hook-t7" style="left:1389px;top:484px;opacity:1"><div class="shot"><img src="assets/img/portal-nl-tenderned.jpg" alt=""></div><div class="lab">tenderned.nl</div></div></div>
+    <div id="hook-grid"><div class="tile" id="hook-t0" style="left:364px;top:46px"><div class="shot"><img src="assets/img/portal-ie-etenders.jpg" alt=""></div><div class="lab">Ireland</div></div><div class="tile" id="hook-t1" style="left:988px;top:46px"><div class="shot"><img src="assets/img/portal-nl-tenderned.jpg" alt=""></div><div class="lab">Netherlands</div></div><div class="tile" id="hook-t2" style="left:364px;top:487px"><div class="shot"><img src="assets/img/portal-fr-place.jpg" alt=""></div><div class="lab">France</div></div><div class="tile" id="hook-t3" style="left:988px;top:487px"><div class="shot"><img src="assets/img/portal-de-nrw.jpg" alt=""></div><div class="lab">Germany</div></div></div>
   </div>
   <script>
     const tl = gsap.timeline({ paused: true });
-    tl.fromTo("#hook-grid", {scale: 1, transformOrigin: "50% 45%"}, {scale: 1.045, duration: 8.77, ease: "none"}, 0);
-    tl.to("#hook-t1", {x: 414, y: 334, duration: .45, ease: "power3.inOut"}, 6.228);
-    tl.to("#hook-t6", {x: -414, y: -334, duration: .45, ease: "power3.inOut"}, 6.228);
-    tl.to("#hook-grid", {x: 7, duration: .04, ease: "none"}, 6.25);
-    tl.to("#hook-grid", {x: -6, duration: .04, ease: "none"}, 6.29);
-    tl.to("#hook-grid", {x: 4, duration: .04, ease: "none"}, 6.33);
-    tl.to("#hook-grid", {x: 0, duration: .04, ease: "none"}, 6.37);
+    tl.fromTo("#hook-grid", {opacity: 0}, {opacity: 1, duration: 1.0, ease: "power1.inOut"}, 0.1);
+    tl.fromTo("#hook-grid", {scale: 1.0, transformOrigin: "50% 45%"}, {scale: 1.04, duration: 9.48, ease: "none"}, 0);
+    tl.to("#hook-t1", {x: -624, y: 441, duration: .55, ease: "power3.inOut"}, 7.11);
+    tl.to("#hook-t2", {x: 624, y: -441, duration: .55, ease: "power3.inOut"}, 7.11);
     window.__timelines["hook"] = tl;
   </script>
 </template>
