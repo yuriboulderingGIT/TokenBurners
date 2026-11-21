@@ -101,3 +101,26 @@ def test_one_portal_remains_spaced_across_hosts() -> None:
 
     first, second = asyncio.run(run())
     assert second - first >= 0.1
+
+
+def test_slow_initial_connection_cannot_bunch_redirect_and_browser_requests():
+    async def exercise():
+        arrivals = []
+
+        async def respond(request):
+            if request.url.path == "/entry":
+                await asyncio.sleep(0.08)  # connection setup before the portal sees the request
+            arrivals.append(asyncio.get_running_loop().time())
+            if request.url.path == "/entry":
+                return httpx.Response(302, headers={"Location": "/listing"})
+            return httpx.Response(200)
+
+        fetcher = Fetcher(min_interval=0.05, transport=httpx.MockTransport(respond))
+        try:
+            await fetcher.get("p", "https://buyer.example/entry")
+            await fetcher.for_portal("p").get("https://cdn.example/app.js")
+            assert all(b-a >= 0.05 for a, b in zip(arrivals, arrivals[1:]))
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())

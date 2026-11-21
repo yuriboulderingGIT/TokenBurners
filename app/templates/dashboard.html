@@ -2,7 +2,7 @@
 
 {% block content %}
 {% set total = portals|length %}
-{% set tenders = portals|sum(attribute="tender_count") %}
+{% set tenders = portals|selectattr("state", "equalto", "serving")|sum(attribute="tender_count") %}
 {% set rank = {"failed": 0, "healing": 1, "integrating": 2, "serving": 3} %}
   <div class="title">
     <h1>Portal monitor</h1>
@@ -17,7 +17,7 @@
     <button type="button" class="kpi glass serving" data-filter="serving" aria-pressed="false" title="Show only serving portals"><div class="label"><i class="dot"></i>Serving</div><div class="value">{{ counts.serving }}</div><div class="sub">tenders available</div></button>
     <button type="button" class="kpi glass healing" data-filter="healing" aria-pressed="false" title="Show only portals being learned or repaired"><div class="label"><i class="dot"></i>Healing</div><div class="value">{{ counts.healing + counts.integrating }}</div><div class="sub">{{ counts.integrating }} being learned, {{ counts.healing }} repairing</div></button>
     <button type="button" class="kpi glass failed" data-filter="failed" aria-pressed="false" title="Show only failed portals"><div class="label"><i class="dot"></i>Failed</div><div class="value">{{ counts.failed }}</div><div class="sub">need a person</div></button>
-    <div class="kpi glass"><div class="label">Tenders delivered</div><div class="value">{{ "{:,}".format(tenders) }}</div><div class="sub">across {{ total }} portal{{ "s" if total != 1 }}</div></div>
+    <div class="kpi glass"><div class="label">Tenders delivered</div><div class="value">{{ "{:,}".format(tenders) }}</div><div class="sub">from {{ counts.serving }} serving portal{{ "s" if counts.serving != 1 }}</div></div>
     <div class="kpi glass"><div class="label">Model spend</div><div class="value">${{ "%.2f"|format(total_cost) }}</div><div class="sub">${{ "%.3f"|format(total_cost / total if total else 0) }} per portal, reads cost $0</div></div>
   </section>
 
@@ -45,7 +45,7 @@
                  data-rank="{{ rank.get(p.state, 9) }}" data-tenders="{{ p.tender_count }}" data-read="{{ p.last_success_at or '' }}">
           <div class="card-top">
             <span class="pill"><i class="dot"></i>{{ p.state }}</span>
-            <span class="when" title="Last good read {{ p.last_success_at or 'never' }}">{{ p.last_success_at|ago if p.last_success_at else "never read" }}</span>
+            <span class="when" title="Last good read {{ p.last_success_at or 'never' }}">{{ p.last_success_at|ago if p.last_success_at else "no verified read yet" }}</span>
             <div class="tools">
               <button type="button" class="icon" data-act="refresh" title="Read again now" aria-label="Read {{ host }} again now">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>

@@ -167,11 +167,13 @@ class RawTender(BaseModel):
     detail_url: str | None = None  # actual fetched detail, independent of a display URL override
     fields: dict[str, str | list[str] | None] = Field(default_factory=dict)
     document_links: list[str] = Field(default_factory=list)  # absolute URLs
+    source_language: str | None = None  # HTML language tag, including region when supplied
 
 
 class ReadResult(BaseModel):
     tenders: list[Tender]
     raw_count: int = 0  # how many list entries the recipe found
+    deadline_times_seen: int = 0
     documents_tried: int = 0
     documents_failed: int = 0
     documents_kept: int = 0  # known files whose check failed; their last verified revision is served

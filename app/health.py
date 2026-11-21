@@ -53,6 +53,8 @@ def check_health(prev: ReadResult | None, new: ReadResult) -> Health:
     previous = prev.tenders if prev else []
     problems += _identity_problems(new)
     problems += _fill_problems(tenders, previous)
+    if new.deadline_times_seen and not any(t.submissionDeadline for t in tenders):
+        problems.append("the source shows submission times, but no deadlines could be parsed with a time zone")
     missing_document_ids: set[str] = set()
     if previous:
         problems += _drop_problems(tenders, previous)

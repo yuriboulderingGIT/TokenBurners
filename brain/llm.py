@@ -79,7 +79,7 @@ class LLM:
     ) -> tuple[dict[str, Any], float]:
         """Returns (parsed JSON answer, cost in USD)."""
         key = hashlib.sha256(f"{model}\n{system}\n{prompt}".encode()).hexdigest()
-        cached = self.cache_dir / f"{key}.json" if self.cache_dir else None
+        cached = self.cache_dir / f"{key}.json" if self.cache_dir and purpose not in {"repair", "reattach"} else None
         if cached and cached.exists():
             return json.loads(cached.read_text(encoding="utf-8")), 0.0
 
@@ -104,7 +104,8 @@ class LLM:
             cached_tokens = getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0
             input_cost = ((tokens_in - cached_tokens) + cached_tokens / 10) * price_in / 1e6
             cost = input_cost + tokens_out * price_out / 1e6
-            self.db.llm_log(portal_id, run_id, model, tokens_in, tokens_out, cost, purpose, reservation=reservation)
+            self.db.llm_log(portal_id, run_id, model, tokens_in, tokens_out, cost,
+                            "attach" if purpose == "reattach" else purpose, reservation=reservation)
         finally:
             # Released, logged or deliberately retained: either way this call no longer holds it.
             self._in_flight.pop(reservation, None)

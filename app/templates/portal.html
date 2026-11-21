@@ -18,7 +18,7 @@
     <span>{{ portal.reason or "no reason recorded" }}</span>
   </div>
   <div class="facts">
-    {% if portal.monitoring_scope %}<span>Monitoring <b>{{ portal.monitoring_scope }}</b></span>{% endif %}
+    {% if portal.monitoring_scope %}<span>{% if portal.monitoring_scope == "Source listing (historical coverage unverified)" %}Monitoring the current listing{% else %}Monitoring <b>{{ portal.monitoring_scope }}</b>{% endif %}</span>{% endif %}
     <span><b>{{ open_count }}</b> open of <b>{{ tenders|length }}</b> tenders</span>
     <span><b>{{ doc_count }}</b> documents</span>
     <span>Last good read <b title="{{ portal.last_success_at or '' }}">{{ portal.last_success_at|ago }}</b></span>
@@ -63,7 +63,7 @@
           </td>
           <td class="hide-sm">{{ t.buyerName or "–" }}</td>
           <td class="hide-sm nowrap">{{ t.publicationDate|day }}</td>
-          <td class="nowrap" title="{{ t.submissionDeadline or 'not shown by the portal' }}">{{ t.submissionDeadline|when }}</td>
+          <td class="nowrap" title="{{ t.submissionDeadline or 'No verified deadline is available' }}">{{ t.submissionDeadline|when if t.submissionDeadline else "unavailable" }}</td>
           <td>
             {% if t.documents %}
             <details><summary>{{ t.documents|length }} file{{ "s" if t.documents|length != 1 }}</summary>
@@ -93,7 +93,7 @@
         {% set st = "serving" if r.result == "ok" else "failed" if r.result == "failed" else "integrating" %}
         <li class="{{ 'healing' if r.kind == 'repair' and r.result == 'ok' else st }}">
           <i class="dot"></i>
-          <span class="what">{{ r.kind|capitalize }} {{ r.result or "running" }}{% if r.model_cost_usd %} <span class="faint">· ${{ "%.4f"|format(r.model_cost_usd) }}</span>{% endif %}</span>
+          <span class="what">{{ r.kind|capitalize }} {{ r.result or "running" }} <span class="faint">· {{ "$%.4f"|format(r.model_cost_usd) }}{% if r.request_count is not none %} · {{ r.request_count }} requests{% endif %}</span></span>
           <span class="when" title="{{ r.started_at }}">{{ r.started_at|ago }}{% if r.took %} · took {{ r.took }}{% endif %}</span>
           {% if lines %}<details><summary>{{ lines[-1].split("] ", 1)[-1] }}</summary><pre>{{ r.notes }}</pre></details>{% endif %}
         </li>
