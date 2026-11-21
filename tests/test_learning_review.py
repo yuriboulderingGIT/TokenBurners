@@ -16,7 +16,7 @@ from brain.run_recipe import MAX_PAGES, RecipeReadError, empty_search_url, porta
 
 _LIST = "http://portal.example/tenders"
 _LIST_HTML = """
-<ul>
+<ul aria-label="Tender notices">
   <li data-id="P1"><h2>School roof replacement</h2></li>
   <li data-id="P2"><h2>Library lighting installation</h2></li>
   <li data-id="P3"><h2>Road resurfacing</h2></li>

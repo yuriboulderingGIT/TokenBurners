@@ -18,6 +18,7 @@
     <span>{{ portal.reason or "no reason recorded" }}</span>
   </div>
   <div class="facts">
+    {% if portal.monitoring_scope %}<span>Monitoring <b>{{ portal.monitoring_scope }}</b></span>{% endif %}
     <span><b>{{ open_count }}</b> open of <b>{{ tenders|length }}</b> tenders</span>
     <span><b>{{ doc_count }}</b> documents</span>
     <span>Last good read <b title="{{ portal.last_success_at or '' }}">{{ portal.last_success_at|ago }}</b></span>
@@ -27,7 +28,11 @@
     <span>Model cost <b data-model-cost-usd="{{ cost }}">${{ "%.3f"|format(cost) }}</b></span>
   </div>
   <div class="actions">
-    <button class="btn ghost" id="refresh" type="button">Read again now</button>
+    <button class="btn ghost" data-action="refresh" type="button">Read again now</button>
+    {% if portal.state == "failed" and recipes %}
+    <button class="btn ghost" data-action="repair" type="button">Repair recipe</button>
+    <button class="btn ghost" data-action="relearn" type="button">Relearn from portal</button>
+    {% endif %}
     <button class="btn ghost danger" id="remove" type="button">Remove portal</button>
   </div>
 
@@ -48,7 +53,9 @@
         <tbody>
         {% for t in tenders %}
         <tr class="{{ {'open': 'serving', 'closed': 'off', 'withdrawn': 'failed'}[t.status] }}">
-          <td><span class="pill"><i class="dot"></i>{{ t.status }}</span></td>
+          <td><span class="pill"><i class="dot"></i>{{ t.status }}</span>
+            {% if t.id in missing %}<div class="t-meta" title="{{ missing[t.id] }}">Absent from listing since {{ missing[t.id]|day }}</div>{% endif %}
+          </td>
           <td>
             <div class="t-title"><a href="{{ t.url }}" rel="noopener" target="_blank">{{ t.title or "(no title shown)" }}</a></div>
             <div class="t-meta">{{ t.id }}{% if t.referenceNumber and t.referenceNumber != t.id %} · ref {{ t.referenceNumber }}{% endif %}
@@ -112,14 +119,14 @@
     try { localStorage.setItem("wt.tab", b.dataset.tab); } catch {}
   }));
   try { if (localStorage.getItem("wt.tab") === "runs") showTab("runs"); } catch {}
-  document.getElementById("refresh").addEventListener("click", async (e) => {
+  document.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", async (e) => {
     e.target.disabled = true;
     try {
-      await call("POST", "/portals/{{ portal.id }}/refresh");
+      await call("POST", `/portals/{{ portal.id }}/refresh?action=${button.dataset.action}`);
       flash("Read started. This page updates by itself.");
     } catch (err) { flash(`Could not start a read: ${err.message}`, true); }
     e.target.disabled = false;
-  });
+  }));
   document.getElementById("remove").addEventListener("click", async () => {
     if (!confirm({{ ("Remove " ~ host ~ "? Watchtower stops reading it within a minute.")|tojson }})) return;
     try {

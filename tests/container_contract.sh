@@ -21,6 +21,7 @@ docker run -d --name "$model" --network "$network" \
     -v "$root/tests:/srv/tests:ro" -v "$root/testset/fixtures/mock:/srv/testset/fixtures/mock:ro" \
     "$image" uvicorn tests.contract_fixture:app --host 0.0.0.0 --port 8091 >/dev/null
 docker run -d --name "$api" --network "$network" -p 127.0.0.1::8080 \
+    -e MOCK_PORTAL_ADDRESS="$mock:8090" \
     -e OPENAI_API_KEY=ci-fixture -e OPENAI_BASE_URL="http://$model:8091/v1" "$image" >/dev/null
 addr="$(docker port "$api" 8080/tcp)"
 export CONTRACT_API_URL="http://$addr" CONTRACT_PORTAL_URL="http://$mock:8090/tenders"

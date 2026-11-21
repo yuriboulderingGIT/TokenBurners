@@ -29,7 +29,8 @@ import httpx
 
 from app import states
 from app.config import (
-    FAILED_RETRY_MINUTES, FIRST_READ_TRIES, INTEGRATING_RETRY_MINUTES, REFRESH_MINUTES, WORKER_CONCURRENCY,
+    DOC_REVALIDATIONS_PER_READ, FAILED_RETRY_MINUTES, FIRST_READ_TRIES, INTEGRATING_RETRY_MINUTES,
+    REFRESH_MINUTES, REFRESH_REPAIR_MINUTES, WORKER_CONCURRENCY,
 )
 from app.db import DB
 from app.documents import store_documents
@@ -37,10 +38,12 @@ from app.fetcher import Fetcher, PortalCancelled, PortalFetcher, RunPageCache
 from app.health import check_health
 from app.models import Health, ReadResult, Recipe, Tender
 from brain.blocks import Blocked
-from brain.learn import AttachFailed, TemporaryAttachFailure, learn_recipe
+from brain.learn import AttachFailed, StoredTenderIds, TemporaryAttachFailure, learn_recipe, validate_candidate
+from brain.lifecycle import recheck_missing
 from brain.llm import LLM, BudgetExceeded, LLMUnavailable
-from brain.normalize import normalize
+from brain.normalize import _single_text, normalize
 from brain.repair import repair
+from brain.scope import is_results_window, monitoring_scope, preserves_scope, scope_known
 from brain.run_recipe import PageLimitExceeded, PaginationError, RecipeReadError, run_recipe
 
 log = logging.getLogger("watchtower.worker")
@@ -69,6 +72,7 @@ class Worker:
         self.queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self.active: dict[str, str] = {}  # portal_id -> run_id of the queued or running read
         self._tasks: list[asyncio.Task] = []
+        self._queued_actions: dict[str, str] = {}  # consumed at start; an in-flight request keeps its run id
 
     # ----- control -----
 
@@ -87,12 +91,16 @@ class Worker:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
-    def request_read(self, portal_id: str) -> str:
+    def request_read(self, portal_id: str, *, action: str = "scheduled") -> str:
         """Queue a read unless one is already queued or running; return its run id."""
         if portal_id in self.active:
-            return self.active[portal_id]
+            active = self.active[portal_id]
+            if self._queued_actions.get(active) in {"scheduled", "refresh"} and action != "scheduled":
+                self._queued_actions[active] = action
+            return active
         run_id = self.db.run_create(portal_id, "read")
         self.active[portal_id] = run_id
+        self._queued_actions[run_id] = action
         self.queue.put_nowait((portal_id, run_id))
         return run_id
 
@@ -144,13 +152,32 @@ class Worker:
                 self.queue.task_done()
 
     async def _handle(self, portal_id: str, run_id: str) -> None:
-        """One queued read. A failed portal gets a plain retry: no repair, so no model cost."""
+        """A scheduled retry stays model-free for failed saved recipes; operators can request recovery."""
+        action = self._queued_actions.pop(run_id, "scheduled")
         try:
             portal = self.db.portal_get(portal_id)
             retry = portal is not None and portal["state"] == states.FAILED
-            if retry and portal["recipe_version"] is not None:
-                self.db.run_note(run_id, "retry of a failed portal: plain read, no repair")
-            await self._read(portal_id, run_id, allow_repair=not retry, retry=retry)
+            if portal is not None and portal["recipe_version"] is not None and action in {"repair", "relearn"}:
+                self.db.execute("UPDATE runs SET kind = 'repair' WHERE id = ?", (run_id,))
+                recipe = self.db.recipe_latest(portal_id)
+                await self._repair(portal_id, recipe, Health(ok=False, problems=[f"operator requested {action}"]),
+                                   self.fetcher.for_portal(portal_id), portal_url=portal["url"],
+                                   repair_run=run_id, relearn=action == "relearn")
+                return
+            if (retry and action == "refresh" and portal["recipe_version"] is None
+                    and not self._refresh_may_use_model(portal_id, run_id, "read")):
+                self.db.run_finish(run_id, "failed", "refresh of a portal that could not attach: the last attempt "
+                                                     f"ran in the last {REFRESH_REPAIR_MINUTES:.0f} minutes")
+                return
+            allow_repair = not retry or action == "relearn" or action == "repair" or (
+                action == "refresh" and self._refresh_may_use_model(portal_id, run_id, "repair"))
+            if retry and not allow_repair and portal["recipe_version"] is not None:
+                self.db.run_note(run_id, "retry of a failed portal: plain read, no repair" if action == "scheduled"
+                                 else f"refresh of a failed portal: plain read, a repair ran in the last "
+                                      f"{REFRESH_REPAIR_MINUTES:.0f} minutes")
+            await self._read(portal_id, run_id, allow_repair=allow_repair, retry=retry)
+        except Blocked as exc:
+            states.set_state(self.db, portal_id, states.FAILED, f"blocked: {exc}", run_id)
         except Exception as e:  # never let one portal kill the worker
             log.exception("read %s crashed", run_id)
             self.db.run_finish(run_id, "failed", f"internal error: {e}")
@@ -199,8 +226,17 @@ class Worker:
                 health = check_health(self._previous(portal_id), result)
                 self.db.run_note(run_id, f"read {result.raw_count} list entries, {len(result.tenders)} tenders")
                 if health.ok:
+                    listed = {tender.id for tender in result.tenders}
+                    rechecks = await recheck_missing(self.db, portal_id, recipe, listed, fetch)
+                    scope = monitoring_scope(portal["url"], recipe)
+                    if result.documents_kept:
+                        self.db.run_note(run_id, f"{result.documents_kept} known document(s) could not be checked "
+                                                 "again; serving their last verified files")
                     count = self.db.save_tenders(
-                        portal_id, result.tenders, repaired_recipe=repaired_recipe, repair_cost_usd=repair_cost_usd,
+                        portal_id, result.tenders, run_id=run_id, scope=scope, rechecks=rechecks,
+                        results_window=is_results_window(scope),
+                        detail_urls=result.detail_urls, source_statuses=result.source_statuses,
+                        repaired_recipe=repaired_recipe, repair_cost_usd=repair_cost_usd,
                     )
                     files = sum(len(tender.documents) for tender in result.tenders)
                     no_links = bool(result.tenders) and not files and not result.tender_ids_with_document_links
@@ -225,6 +261,10 @@ class Worker:
                         reason += ". No documents delivered within the file limit"
                     else:
                         reason += ". No document links found"  # the tender pages were read and show no files
+                    if scope_known(scope):
+                        reason += f". Scope: {scope}"
+                    if count > len(listed):
+                        reason += f". {len(listed)} listed now, {count - len(listed)} kept from earlier reads"
                     states.set_state(self.db, portal_id, states.SERVING, reason, run_id)
                     self.db.run_finish(run_id, "ok", cost_usd=cost)
                     return True
@@ -272,19 +312,31 @@ class Worker:
         raws = await run_recipe(recipe, fetch)
         tenders: list[Tender] = []
         tender_ids_with_document_links: set[str] = set()
-        tried = failed = blocked = 0
+        detail_urls: dict[str, str] = {}
+        source_statuses: dict[str, str] = {}
+        tried = failed = blocked = failed_revalidations = 0
         block_kind: str | None = None
+        # Known files are checked again stalest first, a bounded number per read.
+        revalidate = {row["source_key"] for row in self.db.all(
+            "SELECT source_key FROM document_sources WHERE portal_id = ? ORDER BY last_verified_at LIMIT ?",
+            (portal_id, DOC_REVALIDATIONS_PER_READ),
+        )}
         for raw in raws:
             tender = normalize(raw, recipe.locale)
             if tender is None:
                 continue
+            if raw.detail_url:
+                detail_urls[tender.id] = raw.detail_url
+            if status := _single_text(raw.fields.get("status")):
+                source_statuses[tender.id] = status
             if raw.document_links:
                 tender_ids_with_document_links.add(tender.id)
                 links = list(dict.fromkeys(raw.document_links))
-                stored = await store_documents(self.db, portal_id, tender, links, fetch)
+                stored = await store_documents(self.db, portal_id, tender, links, fetch, revalidate=revalidate)
                 tender.documents = stored.documents
                 tried += len(links)
                 failed += stored.failed + stored.blocked
+                failed_revalidations += stored.failed_revalidations
                 blocked += stored.blocked
                 block_kind = block_kind or stored.block_kind
             tenders.append(tender)
@@ -293,25 +345,37 @@ class Worker:
             raise Blocked(block_kind or "login", "the tender documents can't be downloaded without it")
         return ReadResult(
             tenders=tenders, raw_count=len(raws), documents_tried=tried, documents_failed=failed,
+            documents_kept=failed_revalidations,
             tender_ids_with_document_links=tender_ids_with_document_links,
+            detail_urls=detail_urls, source_statuses=source_statuses,
         )
 
     async def _repair(
         self, portal_id: str, recipe: Recipe, health: Health, fetch: PortalFetcher, *,
         portal_url: str,
         pagination_page: dict[str, str] | None = None,
+        repair_run: str | None = None, relearn: bool = False,
     ) -> None:
         problems = "; ".join(health.problems)
-        repair_run = self.db.run_create(portal_id, "repair")
+        repair_run = repair_run or self.db.run_create(portal_id, "repair")
         self.active[portal_id] = repair_run  # a refresh now returns the run that is still going
         states.set_state(self.db, portal_id, states.HEALING, f"repairing after: {problems}", repair_run)
         llm = self.llm.scoped(portal_id, repair_run, "repair")
         try:
             previous = self._previous(portal_id)
-            new_recipe = await repair(
-                recipe, health, fetch, llm, portal_url=portal_url, pagination_page=pagination_page,
-                stored_tenders=previous.tenders if previous else None,
-            )
+            if relearn:
+                new_recipe = await learn_recipe(portal_url, fetch, llm)
+                if previous:
+                    await validate_candidate(new_recipe, fetch, stored_ids=StoredTenderIds.from_tenders(previous.tenders, recipe))
+            else:
+                new_recipe = await repair(
+                    recipe, health, fetch, llm, portal_url=portal_url, pagination_page=pagination_page,
+                    stored_tenders=previous.tenders if previous else None,
+                )
+            if new_recipe is not None and not preserves_scope(portal_url, recipe, new_recipe):
+                self.db.run_finish(repair_run, "failed", "replacement changed the monitored scope", llm.total_cost)
+                states.set_state(self.db, portal_id, states.FAILED, "replacement changed the monitored scope")
+                return
         except (BudgetExceeded, LLMUnavailable) as e:
             self.db.run_finish(repair_run, "failed", str(e), llm.total_cost)
             states.set_state(self.db, portal_id, states.FAILED, f"repair impossible, model unavailable: {e}")
@@ -342,8 +406,18 @@ class Worker:
         else:
             self.db.run_finish(repair_run, "failed", "replacement recipe failed its full read", llm.total_cost)
 
+    def _refresh_may_use_model(self, portal_id: str, run_id: str, kind: str) -> bool:
+        """A manual refresh of a failed portal may call the model, for a repair or a new attach, at most
+        every REFRESH_REPAIR_MINUTES. Clients may call refresh every few minutes."""
+        last = self.db.one("SELECT MAX(started_at) AS at FROM runs WHERE portal_id = ? AND kind = ? AND id != ?",
+                           (portal_id, kind, run_id))
+        if last is None or last["at"] is None:
+            return True
+        elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(last["at"])
+        return elapsed >= timedelta(minutes=REFRESH_REPAIR_MINUTES)
+
     def _previous(self, portal_id: str) -> ReadResult | None:
-        """What the last healthy read saw. Tenders kept as closed after they left the list don't count."""
+        """What the last healthy read saw. Retained notices outside the listing are tracked separately."""
         stored = self.db.tenders_listed_last(portal_id)
         if not stored:
             return None

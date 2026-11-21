@@ -23,6 +23,10 @@ If the key is missing, set it in your private `.env`, then recreate the containe
 
 A regular read runs the saved recipe in plain code. Watchtower spaces requests from each portal and to each destination host, including document downloads and redirects. It checks identifiers, field coverage, listing counts and document delivery. If a recipe breaks, the portal enters `healing` and continues to serve its last healthy snapshot. A successful repair restores delivery. Login and captcha gates produce `failed` with a reason.
 
+Each read checks up to 30 known documents again, starting with those checked longest ago (`DOC_REVALIDATIONS_PER_READ`). A check uses the ETag or Last-Modified date. A file with neither is downloaded again after 15 minutes, and any file is downloaded in full after 24 hours. A revised document gets a new file link, and older links keep serving their revision. If a check fails, the last verified file stays in the delivery.
+
+A tender the portal no longer lists is kept and marked `closed`. A listing that only shows the latest results also drops tenders that are still open. There a tender stays `open` until its own page shows it closed or withdrawn, or its deadline passes. The dashboard shows since when each tender has been absent from the listing.
+
 ## Find a tender website to try
 
 For a first test, open the Masaryk University listing in a private browser window. Pick a notice and note its title and reference. Paste the **listing URL** into Watchtower. Once it says `serving`, open a tender in the dashboard and compare it with the original notice. Our local run served 15 notices from Masaryk and 10 from Cyprus. [Masaryk University procurement](https://zakazky.muni.cz/) · [Cyprus latest calls for tenders](https://www.eprocurement.gov.cy/epps/quickSearchAction.do?searchType=cftFTS&latest=true)
@@ -47,9 +51,15 @@ reported separately because some portals make their notices public but restrict 
 | `LLM_BUDGET_USD` | `5` | Maximum cumulative modeled spend per persistent data folder, including reservations |
 | `LLM_CACHE` | `1` | Reuse identical model answers |
 | `REFRESH_MINUTES` / `FAILED_RETRY_MINUTES` | `15` / `180` | Healthy refresh and failed-portal retry intervals |
+| `REFRESH_REPAIR_MINUTES` | `60` | A refresh of a failed portal starts a model repair or a new attach at most this often |
+| `DOC_REVALIDATIONS_PER_READ` | `30` | Known documents checked again per read, stalest first |
 | `WORKER_CONCURRENCY` | `16` | Maximum concurrent portal workers |
 | `MIN_REQUEST_INTERVAL` / `HTTP_TIMEOUT` | `1.1` / `30` | Minimum spacing (at least one second) and HTTP timeout in seconds |
+| `PUBLIC_DESTINATIONS_ONLY` | `0` | `1` limits portal requests to public Internet addresses (for public deployments) |
+| `MOCK_PORTAL_ADDRESS` | empty | With `PUBLIC_DESTINATIONS_ONLY=1`: one trusted private host and port, such as `localhost:8090` |
 | `DATA_DIR` | `/data` in Docker, `./data` locally | Persistent storage |
+
+Portals may run on a private network, so Watchtower reaches any address by default. For a public deployment, set `PUBLIC_DESTINATIONS_ONLY=1`. Watchtower then checks all DNS answers for each new connection and connects only to a checked public address. Redirects, search feeds, browser resources and file downloads use the same transport. Also restrict outbound traffic from the container to public destinations and the deployment's trusted DNS resolver at the network layer.
 
 Use a dedicated funded API project for hand-in. Suggested budgets are $5 for development and a $12 project limit with `LLM_BUDGET_USD=10` for judging. The application budget applies to a single data folder. Give the judges the project key privately. [Project and spending controls](https://help.openai.com/en/articles/9186755-managing-projects-in-the-api-platform)
 

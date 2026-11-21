@@ -45,7 +45,7 @@ def _patch_read(monkeypatch, healthy: bool, documents: bool = True) -> None:
     async def fake_run_recipe(recipe, fetch):
         return [RawTender(url=tender.url, document_links=links)]
 
-    async def fake_store_documents(db, portal_id, tender, links, fetch):
+    async def fake_store_documents(db, portal_id, tender, links, fetch, revalidate=None):
         return StoredDocuments(documents=[Document(fileName="tender.pdf", sizeBytes=4, sha256="ab", path="/files/x")])
 
     async def no_repair(*args, **kwargs):

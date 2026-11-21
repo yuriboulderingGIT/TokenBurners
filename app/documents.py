@@ -1,8 +1,8 @@
 """Document pipeline. OWNER: A2.
 
 For every document link of a tender:
-- Already downloaded from this link for this tender? Reuse it: no request, so refreshes stay cheap.
-- Otherwise stream it through the Fetcher (1 req/s per portal), never holding it in memory.
+- Revalidate known files with ETag/Last-Modified. A periodic full download also catches stale validators.
+- Stream downloads through the Fetcher; a changed file receives a new immutable /files URL.
 - Over 250 MB (ZIPs included) -> skipped; the brief allows leaving those out.
 - A ZIP archive is unpacked (also nested ZIPs) and its files are delivered instead of the archive.
   Word/Excel/OpenDocument files are ZIP containers too, but are documents: they stay whole.
@@ -16,12 +16,15 @@ Unpacking runs in a thread so a large archive doesn't freeze the API.
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
+import sqlite3
 import time
 import zipfile
 import zlib
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -30,7 +33,7 @@ import httpx
 
 from app.config import FILES_DIR, MAX_DOC_BYTES
 from app.db import DB, new_id
-from app.fetcher import PortalFetcher, TooLarge
+from app.fetcher import Downloaded, NotModified, PortalFetcher, TooLarge
 from app.models import Document, Tender
 from brain.blocks import detect_block
 
@@ -40,6 +43,8 @@ MAX_UNPACKED_BYTES = 1024 * 1024 * 1024  # per downloaded archive, all members t
 MAX_ZIP_MEMBERS = 1000
 MAX_ZIP_DEPTH = 3  # archive inside archive inside archive
 _CHUNK = 1024 * 1024
+UNVALIDATED_REFRESH_SECONDS = 15 * 60
+FULL_REFRESH_SECONDS = 24 * 60 * 60
 
 # Files that may be ZIP containers internally but are documents in their own right.
 _NOT_ARCHIVES = {
@@ -62,36 +67,67 @@ class StoredDocuments:
     blocked: int = 0  # links that led to a login or captcha page
     block_kind: str | None = None  # "login" | "captcha" for the first blocked link
     too_large: int = 0  # files skipped because they are over 250 MB (allowed by the brief)
+    failed_revalidations: int = 0
 
 
 async def store_documents(
-    db: DB, portal_id: str, tender: Tender, links: list[str], fetch: PortalFetcher
+    db: DB, portal_id: str, tender: Tender, links: list[str], fetch: PortalFetcher,
+    revalidate: set[str] | None = None,
 ) -> StoredDocuments:
+    """`revalidate` limits which known sources this read may check again (None: all that are due)."""
     result = StoredDocuments()
     portal_dir = FILES_DIR / portal_id
     incoming = portal_dir / ".incoming"
     _remove_stale(incoming)
     for url in dict.fromkeys(links):
-        known = db.documents_from_source(portal_id, tender.id, url)
-        if known and all(Path(row["path_on_disk"]).exists() for row in known):
+        key = (portal_id, tender.id, hashlib.sha256(url.encode()).hexdigest())
+        source = db.one("SELECT * FROM document_sources WHERE portal_id=? AND tender_id=? AND source_key=?", key)
+        known = db.source_files(source["file_ids"]) if source else []
+        complete = bool(known) and len(known) == len(json.loads(source["file_ids"])) and all(
+            Path(row["path_on_disk"]).is_file() for row in known
+        )
+        validators = _revalidation_headers(source) if complete else {}
+        if complete and revalidate is not None and key[2] not in revalidate:
+            validators = None  # outside this read's revalidation budget: serve the verified revision
+        if validators is None:
             result.documents.extend(_document(row) for row in known)
             continue
 
+        def keep_verified(problem: str) -> None:
+            # A known file stays the last verified revision; one source's outage must not stop the read.
+            result.failed_revalidations += 1
+            result.documents.extend(_document(row) for row in known)
+            log.info("document %s: revalidation failed (%s), serving the verified revision", url, problem)
+
         try:
-            downloaded = await fetch.stream(url, MAX_DOC_BYTES, incoming)
+            downloaded = await fetch.stream(url, MAX_DOC_BYTES, incoming, validators=validators,
+                                            validator_target=source["validator_target"] if source else None)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
-                _blocked(result, "login")
+                _blocked(result, "login")  # a login now guards the file: the brief's failed state
+            elif complete:
+                keep_verified(f"HTTP {e.response.status_code}")
             else:
                 result.failed += 1
             log.info("document %s: HTTP %s", url, e.response.status_code)
             continue
         except (httpx.HTTPError, httpx.InvalidURL, OSError) as e:
-            result.failed += 1
+            if complete:
+                keep_verified(type(e).__name__)
+            else:
+                result.failed += 1
             log.info("document %s: %s", url, type(e).__name__)
             continue
         # PortalCancelled is deliberately not caught: the worker must stop for a deleted portal.
 
+        if isinstance(downloaded, NotModified):
+            db.execute(
+                "UPDATE document_sources SET last_verified_at=?, etag=COALESCE(?,etag), "
+                "last_modified=COALESCE(?,last_modified) WHERE portal_id=? AND tender_id=? AND source_key=?",
+                (time.time(), downloaded.etag, downloaded.last_modified, *key),
+            )
+            result.documents.extend(_document(row) for row in known)
+            continue
         if isinstance(downloaded, TooLarge):
             result.too_large += 1
             log.info("document %s skipped: over %d bytes", url, MAX_DOC_BYTES)
@@ -101,34 +137,93 @@ async def store_documents(
         if page_block is not None:
             downloaded.path.unlink(missing_ok=True)
             if page_block:
-                _blocked(result, page_block)
+                _blocked(result, page_block)  # login or captcha, also for a file known before
+            elif complete:
+                keep_verified("web page instead of a document")
             else:
                 result.failed += 1  # an ordinary web page is not a document
             continue
 
         name = _file_name(downloaded.file_name, url)
+        verified = time.time()
+        if complete and source["sha256"] == downloaded.sha256 and source["file_name"] == name:
+            downloaded.path.unlink(missing_ok=True)
+            db.execute(
+                "UPDATE document_sources SET etag=?,last_modified=?,validator_target=?,last_verified_at=?, "
+                "last_downloaded_at=? WHERE portal_id=? AND tender_id=? AND source_key=?",
+                (downloaded.etag, downloaded.last_modified, downloaded.validator_target, verified, verified, *key),
+            )
+            result.documents.extend(_document(row) for row in known)
+            continue
         try:
             entries, skipped = await asyncio.to_thread(
                 _finalize, downloaded.path, name, downloaded.size_bytes, downloaded.sha256, portal_dir
             )
         except OSError as e:
             downloaded.path.unlink(missing_ok=True)
-            result.failed += 1
+            if complete:
+                keep_verified(f"could not store the new revision: {e}")
+            else:
+                result.failed += 1
             log.warning("document %s could not be stored: %s", url, e)
             continue
         result.too_large += skipped
-        if known:  # files were missing on disk: replace the old rows' files with fresh ones
-            for row in known:
-                db.execute("DELETE FROM documents WHERE file_id = ?", (row["file_id"],))
-        for entry in entries:
-            db.document_add(
-                portal_id, tender.id, entry.name, entry.size, entry.sha256, str(entry.path),
-                source_url=url, file_id=entry.file_id,
-            )
-            result.documents.append(
-                Document(fileName=entry.name, sizeBytes=entry.size, sha256=entry.sha256, path=f"/files/{entry.file_id}")
-            )
+        result.documents.extend(_save_revision(db, key, url, name, downloaded, entries, verified))
     return result
+
+
+def _revalidation_headers(source: sqlite3.Row) -> dict[str, str] | None:
+    """None while locally fresh, {} for a full read, or the validators for a conditional read."""
+    elapsed = time.time() - source["last_downloaded_at"]
+    if elapsed < 0 or elapsed >= FULL_REFRESH_SECONDS:
+        return {}
+    headers = {}
+    if source["etag"]:
+        headers["If-None-Match"] = source["etag"]
+    if source["last_modified"]:
+        headers["If-Modified-Since"] = source["last_modified"]
+    if headers or elapsed >= UNVALIDATED_REFRESH_SECONDS:
+        return headers
+    return None
+
+
+def _save_revision(
+    db: DB, key: tuple[str, str, str], url: str, name: str, downloaded: Downloaded,
+    entries: list["_Entry"], verified: float,
+) -> list[Document]:
+    """Preserve immutable URLs for identical ZIP members, including restored and legacy files."""
+    history = defaultdict(deque)
+    portal_id, tender_id, _ = key
+    for row in db.documents_from_source(portal_id, tender_id, url):
+        history[(row["file_name"], row["sha256"])].append(row)
+    file_ids = []
+    try:
+        with db.transaction() as conn:
+            for entry in entries:
+                matches = history[(entry.name, entry.sha256)]
+                if matches:
+                    row = matches.popleft()
+                    if Path(row["path_on_disk"]).is_file():
+                        entry.path.unlink()
+                    else:
+                        os.replace(entry.path, row["path_on_disk"])
+                    file_ids.append(row["file_id"])
+                else:
+                    db.document_add(portal_id, tender_id, entry.name, entry.size, entry.sha256,
+                                    str(entry.path), source_url=url, file_id=entry.file_id)
+                    file_ids.append(entry.file_id)
+            conn.execute(
+                "INSERT OR REPLACE INTO document_sources (portal_id,tender_id,source_key,sha256,file_name,"
+                "file_ids,etag,last_modified,validator_target,last_verified_at,last_downloaded_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (*key, downloaded.sha256, name, json.dumps(file_ids), downloaded.etag, downloaded.last_modified,
+                 downloaded.validator_target, verified, verified),
+            )
+    except BaseException:
+        for entry in entries:
+            entry.path.unlink(missing_ok=True)
+        raise
+    return [_document(row) for row in db.source_files(json.dumps(file_ids))]
 
 
 def _document(row) -> Document:

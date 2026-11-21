@@ -32,7 +32,8 @@ from pathlib import Path
 
 import httpx
 
-from app.config import HTTP_TIMEOUT, MIN_REQUEST_INTERVAL, USER_AGENT
+from app.config import HTTP_TIMEOUT, MIN_REQUEST_INTERVAL, PUBLIC_DESTINATIONS_ONLY, USER_AGENT
+from app.destinations import DestinationDenied, PublicHTTPTransport
 
 log = logging.getLogger("watchtower.fetcher")
 
@@ -56,6 +57,20 @@ class Downloaded:
     size_bytes: int
     sha256: str
     file_name: str | None  # from Content-Disposition, if given
+    etag: str | None
+    last_modified: str | None
+    validator_target: str
+
+
+@dataclass
+class NotModified:
+    etag: str | None
+    last_modified: str | None
+
+
+def _validator_target(url: httpx.URL) -> str:
+    # Bind validators to their resource without persisting expiring redirect URLs.
+    return hashlib.sha256(str(url.copy_with(fragment=None)).encode()).hexdigest()
 
 
 class Fetcher:
@@ -71,7 +86,10 @@ class Fetcher:
         self._client = httpx.AsyncClient(
             follow_redirects=False,  # _send follows them, so every hop waits its turn
             timeout=timeout,
-            transport=transport,
+            # PUBLIC_DESTINATIONS_ONLY=1 checks every resolved address. A proxy would resolve the
+            # destination outside that check, so the environment's proxy settings are then ignored.
+            transport=transport if transport is not None or not PUBLIC_DESTINATIONS_ONLY else PublicHTTPTransport(),
+            trust_env=not PUBLIC_DESTINATIONS_ONLY,
             headers={"User-Agent": USER_AGENT},
             # The shared client keeps no cookies; each portal has its own jar (see _send).
             cookies=CookieJar(DefaultCookiePolicy(allowed_domains=[])),
@@ -131,14 +149,22 @@ class Fetcher:
         raise last_error or RuntimeError("unreachable")
 
     async def stream(
-        self, portal_id: str, url: str, max_bytes: int, dest_dir: Path | None = None
-    ) -> Downloaded | TooLarge:
+        self, portal_id: str, url: str, max_bytes: int, dest_dir: Path | None = None, *,
+        validators: dict[str, str] | None = None, validator_target: str | None = None,
+    ) -> Downloaded | TooLarge | NotModified:
         """Download to a file without holding it in memory. Stops past max_bytes."""
         dest_dir = dest_dir or Path(tempfile.gettempdir())
         dest_dir.mkdir(parents=True, exist_ok=True)
-        response = await self._send(portal_id, self._client.build_request("GET", url), stream=True)
+        response = await self._send(portal_id, self._client.build_request("GET", url), stream=True,
+                                    validators=validators, validator_target=validator_target)
         try:
+            etag = response.headers.get("etag")
+            last_modified = response.headers.get("last-modified")
+            if response.status_code == 304 and validators and _validator_target(response.request.url) == validator_target:
+                return NotModified(etag, last_modified)
             response.raise_for_status()
+            if response.status_code != 200:
+                raise httpx.HTTPStatusError("expected a complete document", request=response.request, response=response)
             length = response.headers.get("content-length")
             if length and length.isdigit() and int(length) > max_bytes:
                 return TooLarge(url, int(length))
@@ -158,16 +184,26 @@ class Fetcher:
                         return TooLarge(url, None)
                     digest.update(chunk)
                     out.write(chunk)
-            return Downloaded(path, size, digest.hexdigest(), _filename(response))
+            return Downloaded(path, size, digest.hexdigest(), _filename(response), etag, last_modified,
+                              _validator_target(response.request.url))
         finally:
             await response.aclose()
 
     async def _send(
         self, portal_id: str, request: httpx.Request, *,
         stream: bool = False, follow_redirects: bool = True,
+        validators: dict[str, str] | None = None, validator_target: str | None = None,
     ) -> httpx.Response:
         """Send one request, following redirects by hand: each hop is a request and waits its turn."""
         for _ in range(MAX_REDIRECTS + 1):
+            if request.url.scheme not in {"http", "https"} or request.url.userinfo:
+                raise DestinationDenied("portal requests require an HTTP(S) destination without credentials")
+            if validators:
+                if _validator_target(request.url) == validator_target:
+                    request.headers.update(validators)
+                else:
+                    for name in validators:
+                        request.headers.pop(name, None)
             await self.wait_turn(portal_id, str(request.url))
             jar = self._jars.setdefault(portal_id, httpx.Cookies())
             jar.set_cookie_header(request)  # keeps an explicit Cookie header, e.g. a PublicVisit's
@@ -209,8 +245,12 @@ class PortalFetcher:
         return await self.fetcher.public_search(self.portal_id, url, content=content, media_type=media_type,
                                                 cookies=cookies, headers=headers)
 
-    async def stream(self, url: str, max_bytes: int, dest_dir: Path | None = None) -> Downloaded | TooLarge:
-        return await self.fetcher.stream(self.portal_id, url, max_bytes, dest_dir)
+    async def stream(
+        self, url: str, max_bytes: int, dest_dir: Path | None = None, *,
+        validators: dict[str, str] | None = None, validator_target: str | None = None,
+    ) -> Downloaded | TooLarge | NotModified:
+        return await self.fetcher.stream(self.portal_id, url, max_bytes, dest_dir,
+                                         validators=validators, validator_target=validator_target)
 
     async def wait_turn(self, url: str = "") -> None:
         """For Playwright: call this before letting the browser make a request."""

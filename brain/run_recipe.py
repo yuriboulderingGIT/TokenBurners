@@ -19,6 +19,8 @@ from app.fetcher import PortalFetcher
 from app.models import RawTender, Recipe
 from brain import berlin_documents, charite_documents
 from brain.blocks import Blocked, detect_block
+from brain.notice_evidence import json_collection_kinds, non_notice_target, rejection_reason
+from brain.normalize import _single_text
 from brain.shrink import shrink
 
 MAX_PAGES = 100
@@ -61,6 +63,10 @@ class RecipeReadError(ValueError):
 
 class _PageGone(RecipeReadError):
     """The endpoint returned HTTP 404 or 410."""
+
+
+class NotANotice(RecipeReadError):
+    """The selected entries represent another resource or lack evidence of a notice."""
 
 
 class NoPublicNextLink(RecipeReadError):
@@ -138,6 +144,12 @@ async def run_recipe(
     tenders: list[RawTender] = []
     seen_pages: set[str] = set()
     seen_rows: set[bytes] = set()
+    identities: set[str] = set()
+    fetched_links: set[str] = set()
+    unresolved_links: set[str] = set()  # unvisited validation rows or details removed at source
+    anonymous = 0  # rows without an identifier: distinct rows, the health check judges their ID rate
+    checked = 0  # rows whose notice evidence was examined
+    rejected: list[str] = []  # why examined rows are not individual notices; they are left out
     observed_count = advertised_count = 0
     sampled = skipped = 0
     search_pages = None
@@ -222,32 +234,53 @@ async def run_recipe(
         if not entries:
             return []
 
-        if max_tenders is not None:
-            entries = entries[:max_tenders - sampled]
-        sampled += len(entries)
+        collections = json_collection_kinds(page, entries) if recipe.kind == "json_api" else {}
         for entry in entries:
+            sampling_done = max_tenders is not None and sampled >= max_tenders
+            if sampling_done and not verify_all_pages:
+                break
             source = entry
             tender_url = current_url
             source_base = link_base
+            detail_url = None
             if recipe.detail.link is not None:
                 link = _navigation_url(
                     link_base, detail(entry), origin, "detail.link", source=entry
                 )
                 if link is None:
                     raise RecipeReadError("detail.link found no URL for a list entry")
+                if reason := non_notice_target(link):
+                    checked += 1
+                    rejected.append(f"detail.link points to {reason} instead of an individual procurement notice")
+                    continue
+                if sampling_done:
+                    # A candidate can check the remaining list links without opening more details.
+                    unresolved_links.add(link)
+                    checked += 1
+                    continue
+                sampled += 1
                 try:
                     detail_response = await fetch_page(fetch, link, origin)
                 except _PageGone:
                     skipped += 1
+                    unresolved_links.add(link)
                     continue
+                fetched_links.add(link)
                 tender_url = str(detail_response.url)
+                detail_url = tender_url
                 source = _parse_page(detail_response, recipe.kind)
                 source_base = document_base(source, tender_url)
+            elif not sampling_done:
+                sampled += 1
 
             values = {
                 name: _field_value(selector(source))
                 for name, selector in fields.items()
             }
+            if identifier := _single_text(values.get("id")):
+                identities.add(identifier)
+            else:
+                anonymous += 1
             document_urls = list(dict.fromkeys(
                 url
                 for value in _strings(documents(source), links=True)
@@ -258,8 +291,10 @@ async def run_recipe(
                 _check_block(
                     detail_response, content_available=bool(values.get("id") or document_urls)
                 )
+            observed_file = any(_FILE_SUFFIX.search(urlsplit(url).path) for url in document_urls)
             if isinstance(source, html.HtmlElement):
                 attachments = _attachment_links(source, source_base)
+                observed_file = bool(attachments)
                 if search_pages:
                     # A search row's other links often lead to profiles and navigation.
                     document_urls = [url for url in document_urls if url in attachments]
@@ -268,7 +303,9 @@ async def run_recipe(
                     document_urls = _prefer_ezak_file_links(document_urls, public_files)
                 document_urls.extend(public_files)
             if source is not entry and isinstance(entry, html.HtmlElement):
-                document_urls.extend(url for url in _attachment_links(entry, link_base) if portal_origin(url) == origin)
+                row_attachments = _attachment_links(entry, link_base)
+                observed_file = observed_file or bool(row_attachments)
+                document_urls.extend(url for url in row_attachments if portal_origin(url) == origin)
             if isinstance(values.get("url"), str):
                 # Public feeds may link to a separate notice website. This value is
                 # delivered as metadata only, after all fetch destinations are chosen.
@@ -289,6 +326,21 @@ async def run_recipe(
                                 matches.add(url)
                     if len(matches) == 1:
                         tender_url = matches.pop()
+            record_url = tender_url
+            if (isinstance(source, html.HtmlElement) and values.get("url") and tender_url != detail_url
+                    and tender_url != current_url and not _observed_href(source, source_base, tender_url)):
+                record_url = detail_url or current_url
+            reason = rejection_reason(
+                entry, source, values, collection_kind=collections.get(id(entry)), list_url=current_url,
+                record_url=record_url, detail_url=detail_url, observed_file=observed_file,
+            )
+            checked += 1
+            if reason:
+                # One odd row (a banner, a category teaser) is left out; most rows decide below.
+                rejected.append(f"selected record is not a verified procurement notice: {reason}")
+                continue
+            if sampling_done:
+                continue
             if (
                 recipe.detail.link is None and isinstance(entry, html.HtmlElement)
                 and _EZAK_NOTICE.fullmatch(urlsplit(tender_url).path) and isinstance(values.get("id"), str)
@@ -330,7 +382,8 @@ async def run_recipe(
             # A tender's own page is not one of its documents (tenderned.nl: a recipe mapped both to the
             # notice link, and every read would "download" thousands of web pages as failed files).
             document_urls = [url for url in dict.fromkeys(document_urls) if url != tender_url]
-            tenders.append(RawTender(url=tender_url, fields=values, document_links=document_urls))
+            tenders.append(RawTender(url=tender_url, detail_url=detail_url, fields=values,
+                                     document_links=document_urls))
         if following is None or (not verify_all_pages and max_tenders == sampled):
             break
         page_url = following
@@ -338,6 +391,17 @@ async def run_recipe(
         if recipe.list_.max_pages >= MAX_PAGES:
             raise PageLimitExceeded(observed_count, advertised_count)
         raise PaginationError("pagination exceeded the recipe's max_pages")
+    if rejected and 2 * len(rejected) >= checked:
+        raise NotANotice(f"{rejected[0]} ({len(rejected)} of {checked} rows)")
+    if rejected:
+        log.info("%s: left out %d of %d rows: %s", recipe.list_.url, len(rejected), checked, rejected[0])
+    if advertised_count and (max_tenders is None or verify_all_pages):
+        # Offset and page requests still advance by physical rows. Only distinct
+        # portal IDs can establish coverage on a full read, even if rows overlap.
+        unique_count = len(identities) + anonymous + len(unresolved_links - fetched_links)
+        if unique_count < advertised_count:
+            raise PaginationError(f"the listing advertised {advertised_count} tenders, but pagination exposed "
+                                  f"{unique_count} distinct identities in {observed_count} entries")
     if skipped:
         message = f"{skipped} of {sampled} tender detail pages returned HTTP 404 or 410"
         log.info("%s: %s", recipe.list_.url, message)
