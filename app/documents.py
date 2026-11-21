@@ -35,7 +35,8 @@ from app.config import FILES_DIR, MAX_DOC_BYTES
 from app.db import DB, new_id
 from app.fetcher import Downloaded, NotModified, PortalFetcher, TooLarge
 from app.models import Document, Tender
-from brain.blocks import detect_block
+from brain.blocks import Blocked, detect_block
+from brain.run_recipe import RecipeReadError
 
 log = logging.getLogger("watchtower.documents")
 
@@ -56,6 +57,7 @@ _NOT_ARCHIVES = {
 # Markers of ZIP-based document formats (OOXML, OpenDocument, Java/EPUB).
 _CONTAINER_MARKERS = {"[Content_Types].xml", "mimetype", "META-INF/manifest.xml", "META-INF/MANIFEST.MF"}
 _UNSAFE_NAME_CHARS = re.compile(r'[\x00-\x1f\x7f<>:"|?*]')
+_SPLIT_ZIP = re.compile(r"\.zip\.\d{3,}$", re.I)
 
 
 @dataclass
@@ -68,11 +70,13 @@ class StoredDocuments:
     block_kind: str | None = None  # "login" | "captcha" for the first blocked link
     too_large: int = 0  # files skipped because they are over 250 MB (allowed by the brief)
     failed_revalidations: int = 0
+    cached_files: int = 0
+    access_probes: int = 0
 
 
 async def store_documents(
     db: DB, portal_id: str, tender: Tender, links: list[str], fetch: PortalFetcher,
-    revalidate: set[str] | None = None,
+    revalidate: set[str] | None = None, *, expected_names: dict[str, str] | None = None,
 ) -> StoredDocuments:
     """`revalidate` limits which known sources this read may check again (None: all that are due)."""
     result = StoredDocuments()
@@ -86,19 +90,34 @@ async def store_documents(
         complete = bool(known) and len(known) == len(json.loads(source["file_ids"])) and all(
             Path(row["path_on_disk"]).is_file() for row in known
         )
+        if complete and _SPLIT_ZIP.search(source["file_name"] or ""):
+            # An older reader could mistake the final volume's central directory for a
+            # standalone ZIP and publish a subset of its members in place of the volume.
+            complete = len(known) == 1 and known[0]["sha256"] == source["sha256"]
         validators = _revalidation_headers(source) if complete else {}
-        if complete and revalidate is not None:
-            if key[2] not in revalidate:
-                validators = None  # outside this read's revalidation budget: serve the verified revision
-            elif validators is None:
-                validators = {}  # selected representative: verify access even when the bytes are locally fresh
+        if complete and revalidate is not None and key[2] not in revalidate:
+            validators = None  # outside this read's revalidation budget: serve the verified revision
         if validators is None:
+            if key[2] == getattr(fetch, "probe_source", None):
+                probe = await fetch.document_prefix(url)
+                kind = detect_block(probe.text, probe.status_code)
+                if kind:
+                    raise Blocked(kind, "the previously public document now requires access")
+                head = probe.content.lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+                if (not probe.is_success or not head or "html" in probe.headers.get("content-type", "").lower()
+                        or b"<html" in head[:1024] or head.startswith((b"<!doctype html", b"<form"))):
+                    raise RecipeReadError("a previously public document no longer returns file bytes")
+                result.access_probes += 1
+                db.execute("UPDATE document_sources SET last_access_check=? WHERE portal_id=? AND tender_id=? AND source_key=?",
+                           (time.time(), *key))
+            result.cached_files += len(known)
             result.documents.extend(_document(row) for row in known)
             continue
 
         def keep_verified(problem: str) -> None:
             # A known file stays the last verified revision; one source's outage must not stop the read.
             result.failed_revalidations += 1
+            result.cached_files += len(known)
             result.documents.extend(_document(row) for row in known)
             log.info("document %s: revalidation failed (%s), serving the verified revision", url, problem)
 
@@ -147,7 +166,12 @@ async def store_documents(
                 result.failed += 1  # an ordinary web page is not a document
             continue
 
-        name = _file_name(downloaded.file_name, url)
+        expected = (expected_names or {}).get(url)
+        if expected and not _matches_advertised_file(downloaded.path, expected, downloaded.file_name):
+            downloaded.path.unlink(missing_ok=True)
+            result.failed += 1
+            continue
+        name = _file_name(downloaded.file_name or expected, url)
         verified = time.time()
         if complete and source["sha256"] == downloaded.sha256 and source["file_name"] == name:
             downloaded.path.unlink(missing_ok=True)
@@ -257,6 +281,20 @@ def _remove_stale(incoming: Path, max_age_seconds: float = 3600) -> None:
 # ---------- what did we download? ----------
 
 
+def _matches_advertised_file(path: Path, label: str, returned: str | None) -> bool:
+    """A clicked PDF button must actually yield a PDF, including for extensionless URLs."""
+    suffix = PurePosixPath(label).suffix.lower()
+    if returned and PurePosixPath(returned).suffix.lower() != suffix:
+        return False
+    with path.open("rb") as stream:
+        head = stream.read(1024)
+    if suffix == ".pdf":
+        return b"%PDF-" in head
+    if suffix in {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".zip"}:
+        return zipfile.is_zipfile(path)
+    return bool(head) and not head.lstrip().lower().startswith((b"<html", b"<!doctype html", b"{", b"["))
+
+
 def _web_page(path: Path, content_type: str | None = None) -> str | None:
     """None: not a web page. "": an ordinary web page. "login"/"captcha": a gate."""
     with open(path, "rb") as f:
@@ -325,7 +363,7 @@ def _finalize(path: Path, name: str, size: int, sha256: str, portal_dir: Path, c
 
 def _is_archive(path: Path, name: str) -> bool:
     suffix = PurePosixPath(name).suffix.lower()
-    if suffix in _NOT_ARCHIVES or not zipfile.is_zipfile(path):
+    if _SPLIT_ZIP.search(name) or suffix in _NOT_ARCHIVES or not zipfile.is_zipfile(path):
         return False
     if suffix == ".zip":
         return True

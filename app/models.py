@@ -102,6 +102,7 @@ class SearchTransport(BaseModel):
     """An anonymous search observed while loading the list URL. Bodies are transient."""
 
     endpoint: str
+    listing_tab: str | None = Field(default=None, max_length=180)
     media_type: Literal["application/json", "application/x-www-form-urlencoded"]
     page_field: str | None = None
     page_path: list[str] | None = None  # JSON keys leading to the object that holds page_field
@@ -115,6 +116,7 @@ class SearchTransport(BaseModel):
 
 
 class ListSpec(BaseModel):
+    fields: dict[Literal["id", "title", "status", "submissionDeadline"], str] = Field(default_factory=dict)
     url: str
     scope_label: str | None = None  # derived from the source's listing heading or navigation label
     item: str  # XPath (html) or JSON path (json_api) selecting one list entry
@@ -125,9 +127,13 @@ class ListSpec(BaseModel):
 
 class DetailSpec(BaseModel):
     link: str | None = None  # relative to a list item; None = all fields are on the list
+    rendered: bool = False  # follow the canonical URL observed in a public feed
+    rendered_fields: dict[str, str] = Field(default_factory=dict)
 
 
 class DocumentsSpec(BaseModel):
+    tab: str | None = None  # exact visible label of the primary dossier tab on a tabbed notice
+    page: str | None = None  # XPath on the notice for its own public attachment index
     link: str | None = None
     steps: list[dict[str, Any]] = Field(default_factory=list)  # multi-step downloads (stretch)
 
@@ -136,6 +142,10 @@ class Locale(BaseModel):
     tz: str | None = None  # e.g. Europe/Berlin
     lang: str | None = None  # e.g. de
     country: str | None = None  # e.g. DE
+    deadline_format: str | None = Field(default=None, max_length=120)
+    status_labels: dict[str, TenderStatus] = Field(default_factory=dict)
+    nature_labels: dict[str, ContractNature] = Field(default_factory=dict)
+    procedure_labels: dict[str, ProcedureType] = Field(default_factory=dict)
 
 
 class Recipe(BaseModel):
@@ -168,6 +178,8 @@ class RawTender(BaseModel):
     fields: dict[str, str | list[str] | None] = Field(default_factory=dict)
     document_links: list[str] = Field(default_factory=list)  # absolute URLs
     source_language: str | None = None  # HTML language tag, including region when supplied
+    archived_summary: bool = False
+    document_names: dict[str, str] = Field(default_factory=dict)
 
 
 class ReadResult(BaseModel):
@@ -175,6 +187,10 @@ class ReadResult(BaseModel):
     raw_count: int = 0  # how many list entries the recipe found
     verified_empty: bool = False  # authoritative source explicitly reported zero results
     deadline_times_seen: int = 0
+    invalid_fields: dict[str, int] = Field(default_factory=dict)
+    cached_files: int = 0
+    access_probes: int = 0
+    missing_open_files: int = 0
     documents_tried: int = 0
     documents_failed: int = 0
     documents_kept: int = 0  # known files whose check failed; their last verified revision is served

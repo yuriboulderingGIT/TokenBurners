@@ -258,6 +258,20 @@ class PortalFetcher:
     async def get(self, url: str, **kw) -> httpx.Response:
         return await self.fetcher.get(self.portal_id, url, **kw)
 
+    async def document_prefix(self, url: str) -> httpx.Response:
+        """Read a bounded prefix even when a download server ignores Range."""
+        request = self.fetcher._client.build_request("GET", url, headers={"Range": "bytes=0-16383"})
+        response = await self.fetcher._send(self.portal_id, request, stream=True)
+        try:
+            prefix = bytearray()
+            async for chunk in response.aiter_bytes(16384):
+                prefix.extend(chunk)
+                break
+            return httpx.Response(response.status_code, content=bytes(prefix), request=response.request,
+                                  headers={"Content-Type": response.headers.get("content-type", "")})
+        finally:
+            await response.aclose()
+
     async def public_search(self, url: str, *, content: bytes, media_type: str, cookies: httpx.Cookies,
                             headers: dict[str, str] | None = None) -> httpx.Response:
         return await self.fetcher.public_search(self.portal_id, url, content=content, media_type=media_type,
@@ -287,6 +301,7 @@ class RunPageCache(PortalFetcher):
         super().__init__(fetcher, portal_id)
         self._pages: dict[tuple[str, str], httpx.Response] = {}
         self._bytes = 0
+        self.scanned_pages: dict[str, int] = {}
 
     async def get(self, url: str, **kw) -> httpx.Response:
         key = (url, repr(sorted(kw.items())))
