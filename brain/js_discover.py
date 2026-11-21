@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sys
+import time
 from contextlib import AsyncExitStack
 from urllib.parse import urlsplit
 
@@ -29,11 +30,25 @@ _MAX_RESPONSE_BYTES = 512_000
 _MAX_SCRIPT_BYTES = 8 * 1024 * 1024  # single-page app bundles exceed 4 MB
 # A chunked application may need the whole request budget at one request per second.
 _PAGE_LOAD_SECONDS = 170
-_JSON_WAIT_SECONDS = 18
+_JSON_WAIT_SECONDS = 18  # the least time to wait for a feed after the page loads
+# A large app loads its scripts for minutes through the polite fetcher (tenderned.nl: 85+ files at
+# 1.1 s each). Keep waiting while it still loads; it is done once no request has run for this long.
+_QUIET_SECONDS = 4.0
 _EXTRA_CAPTURE_SECONDS = 1.25
 _BROWSER_REQUESTS = {"document", "script", "xhr", "fetch"}
 _JSON_REQUESTS = {"document", "xhr", "fetch"}
-_FEED_LABELS = {"tenders", "notices", "procurements", "opportunities", "solicitations"}
+_FEED_LABELS = {
+    "tenders", "notices", "procurements", "opportunities", "solicitations",
+    # The same in the languages of European portals (path words, lower case, letters only).
+    "aanbestedingen", "aankondigingen", "publicaties", "ausschreibungen", "bekanntmachungen", "vergaben",
+    "avis", "annonces", "consultations", "licitaciones", "anuncios", "concursos", "bandi", "gare",
+    "przetargi", "ogloszenia", "zakazky", "kunngjoringer", "udbud", "hankinnat",
+}
+# Record keys ending like these name a tender's title (English first, then localized).
+_TITLE_ENDINGS = (
+    "title", "name", "subject", "naam", "titel", "titre", "objet", "nazwa", "nazev", "tittel", "otsikko",
+    "titolo", "oggetto", "bezeichnung", "denominacion",
+)
 _CONFIG_LABELS = {"config", "configuration", "settings", "translations", "metadata"}
 _TENDER_FIELDS = {
     "buyer", "buyername", "cpv", "cpvcodes", "contractingauthority", "deadline",
@@ -175,6 +190,8 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: SearchTranspo
     captured: dict[str, tuple[int, dict | list]] = {}
     ready = asyncio.Event()
     requests = 0
+    in_flight = 0
+    last_activity = time.monotonic()
     document_block: Blocked | None = None
     cancelled: PortalCancelled | None = None
 
@@ -186,6 +203,32 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: SearchTranspo
                 visit.cookies.set(cookie["name"], cookie["value"], domain=cookie["domain"], path=cookie["path"])
 
     async def handle(route: Route) -> None:
+        """Track whether the page is still loading (see wait_for_feed), then serve the request."""
+        nonlocal in_flight, last_activity
+        in_flight += 1
+        last_activity = time.monotonic()
+        try:
+            await serve(route)
+        finally:
+            in_flight -= 1
+            last_activity = time.monotonic()
+
+    async def wait_for_feed() -> None:
+        """Wait for a strong tender feed, at least _JSON_WAIT_SECONDS and as long as the page still loads."""
+        started = time.monotonic()
+        while not ready.is_set():
+            now = time.monotonic()
+            if now - started >= _PAGE_LOAD_SECONDS:
+                return
+            quiet = in_flight == 0 and now - last_activity >= _QUIET_SECONDS
+            if now - started >= _JSON_WAIT_SECONDS and quiet:
+                return
+            try:
+                await asyncio.wait_for(ready.wait(), timeout=0.5)
+            except TimeoutError:
+                pass
+
+    async def serve(route: Route) -> None:
         nonlocal requests, document_block, cancelled, source_total, search_problem
         request = route.request
         await adopt_page_cookies(request.url)
@@ -350,10 +393,7 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: SearchTranspo
                     await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_SECONDS * 1000)
                     if not ready.is_set():
                         await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
-                    try:
-                        await asyncio.wait_for(ready.wait(), timeout=_JSON_WAIT_SECONDS)
-                    except TimeoutError:
-                        pass
+                    await wait_for_feed()
                     if ready.is_set() and cancelled is None:
                         await asyncio.sleep(_EXTRA_CAPTURE_SECONDS)
                 finally:
@@ -397,7 +437,7 @@ def _feed_rank(value: object, context: str, depth: int = 0) -> int:
         keys = {re.sub(r"[^a-z]", "", key.lower()) for key in record}
         rank = max(rank, 2)
         has_identity = any(key == "id" or key.endswith(("id", "reference", "number", "url")) for key in keys)
-        has_title = any(key.endswith(("title", "name", "subject")) for key in keys)
+        has_title = any(key.endswith(_TITLE_ENDINGS) for key in keys)
         if has_identity and has_title:
             if named_feed or keys & _TENDER_FIELDS:
                 return _STRONG_FEED
