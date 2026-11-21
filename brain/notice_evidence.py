@@ -2,6 +2,7 @@
 
 import json
 import re
+import unicodedata
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -10,13 +11,21 @@ from lxml import html
 
 _NOTICE = re.compile(
     r"\b(?:tenders?|notices?|procurements?|contracts?|opportunit(?:y|ies)|cft|bekanntmachungen?|"
-    r"ausschreibungen?|publications?|avis|marchés?|opportunit[eé]s|zamówieni[ae]|gara|gare)\b", re.I,
+    r"ausschreibungen?|publications?|avis|marches?|opportunites?|zamowieni[ae]|gara|gare|"
+    r"aanbestedingen?|opdrachten?|licitaciones?|appalti|bandi|przetarg(?:i|u|ach)?|zakazk[ay]|verejne zakazky|"
+    r"διαγωνισμος|προκηρυξη|contratacion)\b", re.I,
 )
 _OTHER = re.compile(
     r"\b(?:categor(?:y|ies)|kategorien?|facets?|taxonom(?:y|ies)|cpv|buyers?|organisations?|"
-    r"organizations?|authorities|suppliers?|news(?:room)?|press releases?|navigation|nav|menu|settings|configuration)\b", re.I,
+    r"organizations?|authorities|suppliers?|news(?:room)?|press releases?|navigation|nav|menu|settings|configuration|"
+    r"categorie[eë]n?|cat[eé]gories?|categor[ií]as?|categor[ií]e|kategorie|kategor[ií]e|"
+    r"κατηγοριες|kategorie|kategorije)\b", re.I,
 )
-_FORM = re.compile(r"\b(?:search form|search criteria)\b", re.I)
+_FORM = re.compile(
+    r"\b(?:search form|search criteria|formulaire de recherche|formulario de busqueda|"
+    r"modulo di ricerca|zoekformulier|formularz wyszukiwania|vyhledavaci formular|"
+    r"αναζητηση)\b", re.I,
+)
 _SOURCE_FIELDS = ("referenceNumber", "buyerName", "submissionDeadline", "procedureType", "contractNature")
 _NOTICE_KEYS = {"notice id", "notice number", "tender id", "tender number", "submission deadline", "contract nature"}
 _DIRECTORY_FILTER = {"cpv", "cpvcode", "category", "categoryid", "buyer", "buyerid"}
@@ -26,6 +35,8 @@ _INDEX_ROUTES = {"tenders", "notices", "contracts", "opportunities", "procuremen
 
 def _words(value: str) -> str:
     value = re.sub(r"([a-z])([A-Z])", r"\1 \2", value)
+    value = "".join(c for c in unicodedata.normalize("NFKD", value.casefold())
+                     if not unicodedata.combining(c))
     return re.sub(r"[^\w]+|_", " ", value).strip().casefold()
 
 

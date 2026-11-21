@@ -6,6 +6,7 @@ import logging
 import re
 import sys
 import time
+import unicodedata
 from contextlib import AsyncExitStack
 from urllib.parse import urlsplit
 
@@ -47,12 +48,13 @@ _FEED_LABELS = {
     # The same in the languages of European portals (path words, lower case, letters only).
     "aanbestedingen", "aankondigingen", "publicaties", "ausschreibungen", "bekanntmachungen", "vergaben",
     "avis", "annonces", "consultations", "licitaciones", "anuncios", "concursos", "bandi", "gare",
-    "przetargi", "ogloszenia", "zakazky", "kunngjoringer", "udbud", "hankinnat",
+    "przetargi", "ogloszenia", "zakazky", "verejne", "kunngjoringer", "udbud", "hankinnat",
+    "appalti", "aanbestedingen", "licitaciones", "διαγωνισμοι", "προκηρυξεις",
 }
 # Record keys ending like these name a tender's title (English first, then localized).
 _TITLE_ENDINGS = (
-    "title", "name", "subject", "naam", "titel", "titre", "objet", "nazwa", "nazev", "tittel", "otsikko",
-    "titolo", "oggetto", "bezeichnung", "denominacion",
+    "title", "name", "subject", "naam", "titel", "titre", "objet", "objeto", "nazwa", "nazev", "tittel", "otsikko",
+    "titolo", "oggetto", "bezeichnung", "denominacion", "tytul", "nazevzakazky", "τιτλος", "τιτλοσ", "ονομα",
 )
 _CONFIG_LABELS = {"config", "configuration", "settings", "translations", "metadata"}
 _TENDER_FIELDS = {
@@ -436,7 +438,7 @@ def _feed_rank(value: object, context: str, depth: int = 0) -> int:
     if not isinstance(value, list):
         return 0
 
-    labels = set(re.findall(r"[a-z]+", context.lower()))
+    labels = set(re.findall(r"[^\W_]+", _fold_key(context)))
     is_config = bool(labels & _CONFIG_LABELS)
     named_feed = bool(labels & _FEED_LABELS)
     rank = 0
@@ -446,7 +448,7 @@ def _feed_rank(value: object, context: str, depth: int = 0) -> int:
         # Keep localized or unfamiliar record shapes ahead of known settings endpoints.
         if is_config:
             return 1
-        keys = {re.sub(r"[^a-z]", "", key.lower()) for key in record}
+        keys = {_fold_key(key).replace(" ", "") for key in record}
         rank = max(rank, 2)
         has_identity = any(key == "id" or key.endswith(("id", "reference", "number", "url")) for key in keys)
         has_title = any(key.endswith(_TITLE_ENDINGS) for key in keys)
@@ -455,6 +457,13 @@ def _feed_rank(value: object, context: str, depth: int = 0) -> int:
                 return _STRONG_FEED
             rank = 3
     return rank
+
+
+def _fold_key(value: str) -> str:
+    """Keep non-Latin letters while ignoring Latin accents in localized API names."""
+    folded = "".join(c for c in unicodedata.normalize("NFKD", value.casefold())
+                     if not unicodedata.combining(c))
+    return "".join(c if c.isalnum() or c.isspace() else " " for c in folded)
 
 
 def _sample(value: object, depth: int = 0) -> object:
