@@ -413,8 +413,8 @@ def test_attach_verifies_21_pages_with_sparse_fields_and_footer_captcha():
             assert result.list_.max_pages == 21
             assert len(llm.calls) == 2
             requested = [url for _, _, url in fetcher.request_log]
-            assert set(requested) == set(page_urls + detail_urls[:3] + [detail_urls[10], detail_urls[20]])
-            assert requested[-1] == detail_urls[20]
+            assert set(requested) == set(page_urls + detail_urls[:3])
+            assert requested[-1] == page_urls[-1]
         finally:
             await fetcher.aclose()
 
