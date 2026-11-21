@@ -113,17 +113,21 @@ def test_turnover_can_supply_a_verified_historical_detail(first_probe, override_
 def test_worker_repairs_from_a_stored_tender_after_new_rows_and_navigation(tmp_path, can_repair, use_details):
     db = DB(tmp_path / "identity.sqlite")
     portal = db.portal_create(_LIST)
+    files = "//a[contains(@href, '/files/')]/@href"
     previous = Recipe.model_validate({
         "list": {"url": _LIST, "item": "//li"},
         "detail": {"link": ".//a/@href"},
         "fields": {"id": "//code", "title": "//h1"},
+        "documents": {"link": files},
     })
     db.recipe_save(portal, previous, "attach", 0)
     pages = {_LIST: "<ul>" + "".join(
         f'<li><a href="/old/{key}">Tender {key}</a></li>' for key in ("A", "B")
     ) + "</ul>"}
+    for key in ("A", "B", "C", "D", "E"):
+        pages[f"{_BASE}/files/{key}.pdf"] = b"%PDF-1.4 tender " + key.encode()
     for key in ("A", "B"):
-        pages[f"{_BASE}/old/{key}"] = f"<h1>Tender {key}</h1><code>REF-{key}</code>"
+        pages[f"{_BASE}/old/{key}"] = f'<h1>Tender {key}</h1><code>REF-{key}</code><a href="/files/{key}.pdf">PDF</a>'
     fetcher = FakeFetcher(pages)
 
     class Model:
@@ -149,11 +153,12 @@ def test_worker_repairs_from_a_stored_tender_after_new_rows_and_navigation(tmp_p
             attr = "data-portal-key" if can_repair and self.attempts > 1 else "data-row-key"
             return {
                 "list": {"url": _LIST, "item": "//article"},
-                "detail": {"link": ".//a/@href" if use_details else None},
+                "detail": {"link": ".//a[1]/@href" if use_details else None},
                 "fields": {
                     "id": f"//h2/@{attr}" if use_details else f"@{attr}",
-                    "title": "//h2" if use_details else ".//a",
+                    "title": "//h2" if use_details else ".//a[1]",
                 },
+                "documents": {"link": files if use_details else ".//a[@class='doc']/@href"},
             }
 
     async def run():
@@ -170,11 +175,13 @@ def test_worker_repairs_from_a_stored_tender_after_new_rows_and_navigation(tmp_p
             keys = ("C", "D", "E", "B", "A")
             pages[_LIST] = navigation + "".join(
                 f'<article data-portal-key="REF-{key}" data-row-key="row-{key}">'
-                f'<a href="/new/{key}">Tender {key}</a></article>' for key in keys
+                f'<a href="/new/{key}">Tender {key}</a><a class="doc" href="/files/{key}.pdf">PDF</a></article>'
+                for key in keys
             )
             for key in keys:
                 pages[f"{_BASE}/new/{key}"] = (
                     f'<h2 data-portal-key="REF-{key}" data-row-key="row-{key}">Tender {key}</h2>'
+                    f'<a href="/files/{key}.pdf">PDF</a>'
                 )
             worker.request_read(portal)
             await asyncio.wait_for(worker.queue.join(), 5)

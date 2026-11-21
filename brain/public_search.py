@@ -69,7 +69,10 @@ class ObservedSearch:
         if not eligible_endpoint(source, request.url) or request.headers.get("authorization"):
             return None
         media = request.headers.get("content-type", "").split(";")[0].strip().lower()
-        raw = request.post_data or ""
+        try:
+            raw = request.post_data or ""
+        except UnicodeDecodeError:
+            return None  # a compressed or binary body has no fields to replay
         if len(raw) > 256_000:
             return None
         try:

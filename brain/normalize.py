@@ -19,7 +19,7 @@ _SERVER_TIMESTAMP = re.compile(
     r"\d{1,2} \d{2}:\d{2}:\d{2} (?:UTC|GMT|CET|CEST|EET|EEST|WET|WEST) \d{4}$"
 )
 _DATE_ORDERS_BY_COUNTRY = {
-    "AT": "DMY", "BE": "DMY", "DE": "DMY", "ES": "DMY", "FR": "DMY", "GB": "DMY",
+    "AT": "DMY", "BE": "DMY", "CZ": "DMY", "DE": "DMY", "ES": "DMY", "FR": "DMY", "GB": "DMY",
     "IE": "DMY", "IT": "DMY", "LU": "DMY", "NL": "DMY", "PL": "DMY", "US": "MDY",
 }
 # Civil time used by mainland European procurement portals.
@@ -36,7 +36,7 @@ _COUNTRY_ZONES = {
     "RO": "Europe/Bucharest", "SE": "Europe/Stockholm", "SI": "Europe/Ljubljana",
     "SK": "Europe/Bratislava", "UK": "Europe/London",
 }
-_DAY_FIRST_LANGUAGES = {"de", "es", "fr", "it", "nl", "pl"}
+_DAY_FIRST_LANGUAGES = {"cs", "de", "es", "fr", "it", "nl", "pl"}
 _PROCEDURES = {
     "open": "open", "open procedure": "open", "offenes verfahren": "open",
     "appel d’offres ouvert": "open", "appel d'offres ouvert": "open",

@@ -20,7 +20,8 @@ from brain.llm import ScopedLLM
 from brain.normalize import normalize
 from brain.run_recipe import (
     MAX_PAGES, MissedNextPage, NoPublicNextLink, Origin, PaginationError, RecipeReadError, advertised_next_urls,
-    _advertised_total_count, canonical_origin, empty_search_url, fetch_page, is_json_response, next_page_controls,
+    _advertised_total_count, _attachment_links, canonical_origin, empty_search_url, fetch_page, is_json_response,
+    next_page_controls,
     document_base, navigation_view, portal_origin, resolve_portal_url, run_recipe,
 )
 from brain.public_search import api_subdomain
@@ -61,6 +62,33 @@ class RecipeValidationError(ValueError):
 
 class InvalidListingSample(RecipeValidationError):
     """The sampled listing lacks identifiable notices."""
+
+
+class IncompleteRecipe(RecipeValidationError):
+    """The recipe reads real tenders but misses their documents or their own pages.
+
+    Attach asks the model again with this as feedback. If no attempt does better, the
+    recipe is kept (`recipe`), so the tenders are delivered and the state says what is missing.
+    """
+
+    def __init__(self, message: str, *, no_documents: bool, shared_url: bool, tender_urls: list[str]) -> None:
+        super().__init__(message)
+        self.recipe: Recipe | None = None
+        self.no_documents = no_documents
+        self.shared_url = shared_url
+        self.tender_urls = tender_urls  # the sampled tenders' own pages, to look for documents there
+
+
+def _files_visible(page: "PageSample | None") -> bool:
+    """Does the page show something that looks like a document link? (page.links leaves files out.)"""
+    if page is None or page.document is None:
+        return False
+    for anchor in page.document.xpath("//a[@href]"):
+        href = anchor.get("href", "")
+        if (urlsplit(href).path.lower().endswith(_FILES) or "download" in href.lower()
+                or anchor.get("download") is not None):
+            return True
+    return False
 
 
 def _unique_ids(pairs: Iterable[tuple[str | None, str]]) -> dict[str, str]:
@@ -208,9 +236,13 @@ async def detail_sample(
 
 async def validate_candidate(
     recipe: Recipe, fetch: PortalFetcher, *, expected_document_ids: set[str] | None = None,
-    stored_ids: StoredTenderIds | None = None,
+    stored_ids: StoredTenderIds | None = None, require_complete: bool = False,
 ) -> None:
-    """Check the whole page chain and sample at most three tender details."""
+    """Check the whole page chain and sample at most three tender details.
+
+    require_complete (attach): the sampled tenders must also have their own page and document
+    links. Otherwise IncompleteRecipe is raised after every other check has passed.
+    """
     if not 1 <= recipe.list_.max_pages <= MAX_PAGES:
         raise RecipeValidationError(f"max_pages must be between 1 and {MAX_PAGES}")
     if recipe.documents.steps:
@@ -224,6 +256,11 @@ async def validate_candidate(
     rows = await run_recipe(sample_recipe, fetch, max_tenders=_SAMPLE_SIZE, verify_all_pages=True)
     if not rows:
         raise InvalidListingSample("the list selector found no tenders")
+    # A feed or table can mix in records of another kind (a procurement plan notice, a header row)
+    # with neither ID nor title. Reads skip those; the sample may too, if most rows are tenders.
+    blank = [row for row in rows if not row.fields.get("id") and not row.fields.get("title")]
+    if blank and len(blank) * 2 < len(rows):
+        rows = [row for row in rows if row not in blank]
     tenders = [tender for row in rows if (tender := normalize(row, recipe.locale)) is not None]
     if len(tenders) != len(rows) or any(not tender.title for tender in tenders):
         raise InvalidListingSample("sample tenders need a portal-issued ID and a title")
@@ -253,6 +290,32 @@ async def validate_candidate(
         ]
         if affected and not any(row.document_links for row in affected):
             raise RecipeValidationError("sampled tenders still have no document links")
+    if require_complete:
+        shared_url = len(tenders) > 1 and len({tender.url for tender in tenders}) == 1
+        no_documents = not any(row.document_links for row in rows)
+        if shared_url or no_documents:
+            missing = []
+            if shared_url:
+                missing.append(
+                    "every sampled tender has the same address. Set detail.link (or fields.url) to each "
+                    "tender's own page"
+                )
+            if no_documents:
+                missing.append(
+                    "no sampled tender has document links. Tender documents usually sit on the tender's own "
+                    "page: set detail.link to open it and documents.link to its file or download links"
+                )
+            if not any(t.submissionDeadline or t.buyerName or t.publicationDate for t in tenders):
+                # A list of files or category pages also has IDs and titles. Sparse portals stay valid
+                # (the track wants null for fields it does not show); this only adds to the feedback.
+                missing.append(
+                    "no sampled row shows a deadline, buyer or publication date: check that list.item "
+                    "selects the tender rows and map those fields"
+                )
+            raise IncompleteRecipe(
+                "; ".join(missing), no_documents=no_documents, shared_url=shared_url,
+                tender_urls=[tender.url for tender in tenders],
+            )
 
 
 async def propose_html_recipe(
@@ -268,6 +331,7 @@ async def propose_html_recipe(
     expected_document_ids: set[str] | None = None,
     stored_ids: StoredTenderIds | None = None,
     detail_stored_id: str | None = None,
+    require_complete: bool = False,
 ) -> Recipe:
     prompt = {
         "task": (
@@ -275,9 +339,12 @@ async def propose_html_recipe(
             "list page URL. Set list.item to an XPath for the repeated row or card and "
             "list.next_page to an XPath for a single next URL, or null for a recognized GET "
             "pagination form that Watchtower can follow. Set detail.link to "
-            "a relative XPath returning the detail href per row, or null if the row supplies "
-            "the data. Field and document XPaths run on the detail page, or relative to "
-            "the row when there is no detail link. Use XPath 1.0 and only standard functions. "
+            "a relative XPath returning each row's own tender page href. Use null only when the "
+            "row itself already holds the tender's data and its document links. Field and document "
+            "XPaths run on the detail page, or relative to the row when there is no detail link. "
+            "Every tender must be delivered with its documents: when detail_page is given, find its "
+            "file or download links (PDF, ZIP, DOC, XLS, tender documents) for documents.link. "
+            "Use XPath 1.0 and only standard functions. "
             "Prefer label-based selectors and use a class-token match to distinguish adjacent columns. "
             "Use fields.id for the exact portal-issued ID, including a row's data-oid when present. "
             "If the portal only provides a stable "
@@ -333,15 +400,23 @@ async def propose_html_recipe(
                     etree.XPath(expression, regexp=False)(probe)
                 except etree.XPathError:
                     del candidate.fields[key]
+    checks = {"expected_document_ids": expected_document_ids, "stored_ids": stored_ids,
+              "require_complete": require_complete}
     try:
-        await validate_candidate(candidate, fetch, expected_document_ids=expected_document_ids, stored_ids=stored_ids)
-    except MissedNextPage:
-        # Prefer the model's selector when it works. A labelled link can recover a
-        # missed pager even when repeated rows pushed it outside the model's excerpt.
-        if listing.document is None or not listing.document.xpath(_LABELLED_NEXT):
-            raise
-        candidate.list_.next_page = _LABELLED_NEXT
-        await validate_candidate(candidate, fetch, expected_document_ids=expected_document_ids, stored_ids=stored_ids)
+        try:
+            await validate_candidate(candidate, fetch, **checks)
+        except MissedNextPage:
+            # Prefer the model's selector when it works. A labelled link can recover a
+            # missed pager even when repeated rows pushed it outside the model's excerpt.
+            if listing.document is None or not listing.document.xpath(_LABELLED_NEXT):
+                raise
+            candidate.list_.next_page = _LABELLED_NEXT
+            await validate_candidate(candidate, fetch, **checks)
+    except IncompleteRecipe as exc:
+        candidate.learned_by = getattr(llm, "strong_model_name", llm.model_name) if strong else llm.model_name
+        candidate.learned_at = now_iso()
+        exc.recipe = candidate  # it works; attach keeps it if no later attempt finds the documents
+        raise
     candidate.learned_by = llm.strong_model_name if strong else llm.model_name
     candidate.learned_at = now_iso()
     return candidate
@@ -477,9 +552,14 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
         if not _observed_url(preferred, listing, origin):
             preferred = None
             if listing.document is not None:
-                for row in listing.document.xpath("//tr[td[3] and td//a[@href]] | //article[.//header//a[@href]]")[:3]:
+                base = document_base(listing.document, listing.url)
+                for row in listing.document.xpath(
+                    "//tr[td[3] and td//a[@href]] | //article[.//header//a[@href]]"
+                    " | //tr[.//a[contains(@href, 'contract_display_')]]"
+                )[:_SAMPLE_SIZE]:
                     targets = {_observed_url(href, listing, origin) for href in row.xpath(".//a/@href")}
                     targets.discard(None)
+                    targets.difference_update(_attachment_links(row, base), {listing.url})
                     if len(targets) == 1:
                         preferred = targets.pop()
                         break
@@ -489,12 +569,33 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
 
     feedback: list[str] = []
     pagination_page = None
+    fallback: Recipe | None = None  # reads tenders, but without their documents or own pages
+    asked_again = False
     for strong in [False] * max(0, 3 - navigation_calls) + [True]:
+        if fallback is not None:
+            if asked_again:
+                break  # one more cheap attempt with the feedback is enough; credits are limited
+            asked_again, strong = True, False
         try:
             return await propose_html_recipe(
-                listing, detail, fetch, llm, strong=strong, feedback=feedback, pagination_page=pagination_page
+                listing, detail, fetch, llm, strong=strong, feedback=feedback, pagination_page=pagination_page,
+                require_complete=True,
             )
         except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:
+            if isinstance(exc, IncompleteRecipe) and exc.recipe is not None:
+                fallback = exc.recipe
+                if exc.no_documents and detail is None:
+                    # No tender page was sampled yet: open one (a single request) to see whether
+                    # it holds documents. It also becomes evidence for the next attempt.
+                    own_pages = [url for url in exc.tender_urls if url != listing.url]
+                    if own_pages:
+                        detail = await detail_sample(listing, fetch, origin, own_pages[0])
+                # Ask again only when the pages show what the recipe missed: file links, or a
+                # tender's own page. Otherwise another model call cannot do better.
+                missed = ((exc.no_documents and (_files_visible(detail) or _files_visible(listing)))
+                          or (exc.shared_url and detail is not None))
+                if not missed or asked_again:
+                    break
             message = str(exc).strip() or type(exc).__name__
             if message not in feedback:
                 feedback.append(message)
@@ -511,6 +612,9 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                         raise AttachFailed(str(error)) from error
                     feedback = []
                     pagination_page = None
+    if fallback is not None:
+        # Deliver the tenders; the worker reports the missing documents as the portal's state.
+        return fallback
     search_url = empty_search_url(listing.navigation, listing.url)
     if search_url and search_url not in visited and feedback == ["the list selector found no tenders"]:
         try:

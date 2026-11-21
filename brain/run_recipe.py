@@ -42,6 +42,14 @@ _OFFSET_QUERY_KEYS = {"offset", "skip", "start"}
 _TOTAL_KEYS = {"total", "totalcount", "nbtotal", "totalelements", "totalresults", "totalrecords", "totalhits", "nbhits"}
 _PAGER_CONTEXT = re.compile(r"\b(?:pagination|paginator|paging|pager|page navigation)\b", re.I)
 _PAGE_PATH_SUFFIX = re.compile(r"/(?:page|seite|pagina)/[0-9]+/?$", re.I)
+_FILE_SUFFIX = re.compile(r"\.(?:pdf|zip|docx?|xlsx?|pptx?|odt|ods|rtf|csv|rar|7z)$", re.I)
+_FILE_LABEL = re.compile(
+    r"(?:\S+\.(?:pdf|zip|docx?|xlsx?|pptx?|odt|ods|rtf|csv|rar|7z)|\b(?:notice|document|attachment) PDF)$",
+    re.I,
+)
+_EZAK_NOTICE = re.compile(r"/contract_display_[0-9]+\.html$")
+_EZAK_FILE = re.compile(r"/document_([0-9]+)/[^/]+$")
+_EZAK_DOCUMENT_PAGE = re.compile(r"/document_download_([0-9]+)\.html$")
 
 Selector = Callable[[Any], list[Any]]
 Origin = tuple[str, str, int]
@@ -226,27 +234,24 @@ async def run_recipe(
                 _check_block(
                     detail_response, content_available=bool(values.get("id") or document_urls)
                 )
-            if search_pages and isinstance(source, html.HtmlElement) and document_urls:
-                # Search cards also link to buyer profiles, other searches and notice pages.
-                # Keep attachment links supported by HTML metadata or an actual file name.
-                attachments = set()
-                for anchor in source.xpath("descendant-or-self::a[@href]"):
-                    url = _resolve_http_url(source_base, anchor.get("href"))
-                    if url not in document_urls:
-                        continue
-                    if ("download" in anchor.attrib or "enclosure" in anchor.get("rel", "").split()
-                            or anchor.get("type", "").startswith("application/")
-                            or re.search(r"\.(?:pdf|zip|docx?|xlsx?|odt|ods|csv|rar|7z)$",
-                                         urlsplit(url).path, re.I)):
-                        attachments.add(url)
-                document_urls = [url for url in document_urls if url in attachments]
+            if isinstance(source, html.HtmlElement):
+                attachments = _attachment_links(source, source_base)
+                if search_pages:
+                    # A search row's other links often lead to profiles and navigation.
+                    document_urls = [url for url in document_urls if url in attachments]
+                public_files = [url for url in attachments if portal_origin(url) == origin]
+                if source is not entry and _EZAK_NOTICE.fullmatch(urlsplit(tender_url).path):
+                    document_urls = _prefer_ezak_file_links(document_urls, public_files)
+                document_urls.extend(public_files)
+            if source is not entry and isinstance(entry, html.HtmlElement):
+                document_urls.extend(url for url in _attachment_links(entry, link_base) if portal_origin(url) == origin)
             if isinstance(values.get("url"), str):
                 # Public feeds may link to a separate notice website. This value is
                 # delivered as metadata only, after all fetch destinations are chosen.
                 if recipe.kind == "json_api":
-                    tender_url = _resolve_http_url(tender_url, values["url"]) or tender_url
+                    tender_url = _resolve_http_url(source_base, values["url"]) or tender_url
                 else:
-                    tender_url = resolve_portal_url(tender_url, values["url"], origin) or tender_url
+                    tender_url = resolve_portal_url(source_base, values["url"], origin) or tender_url
             if recipe.detail.link is None and tender_url == current_url and isinstance(entry, html.HtmlElement):
                 tender_url = _title_link(entry, values.get("title"), link_base, origin, document_urls) or current_url
                 if search_pages and tender_url == current_url and isinstance(values.get("id"), str):
@@ -260,6 +265,27 @@ async def run_recipe(
                                 matches.add(url)
                     if len(matches) == 1:
                         tender_url = matches.pop()
+            if (
+                recipe.detail.link is None and isinstance(entry, html.HtmlElement)
+                and _EZAK_NOTICE.fullmatch(urlsplit(tender_url).path) and isinstance(values.get("id"), str)
+                and _observed_href(entry, link_base, tender_url)
+            ):
+                # E-ZAK exposes the files on the observed notice rather than in its listing.
+                # Keep the list row as the authority for the tender's fields.
+                try:
+                    detail_response = await fetch_page(fetch, tender_url, origin)
+                except _PageGone:
+                    skipped += 1
+                    continue
+                _check_block(detail_response)
+                detail_url = str(detail_response.url)
+                if urlsplit(detail_url).path != urlsplit(tender_url).path:
+                    raise RecipeReadError("the E-ZAK document page redirected away from the observed tender")
+                detail_doc = _parse_page(detail_response, "html")
+                detail_base = document_base(detail_doc, detail_url)
+                document_urls.extend(
+                    url for url in _attachment_links(detail_doc, detail_base) if portal_origin(url) == origin
+                )
             if isinstance(entry, html.HtmlElement) and (answers := charite_documents.answers_url(
                 current_url, entry, values.get("id"),
             )):
@@ -277,7 +303,7 @@ async def run_recipe(
                 except (Blocked, RecipeReadError, httpx.HTTPError) as exc:
                     # The listing remains readable when one delegated detail is unavailable.
                     log.info("Berlin document source unavailable: %s", exc)
-            tenders.append(RawTender(url=tender_url, fields=values, document_links=document_urls))
+            tenders.append(RawTender(url=tender_url, fields=values, document_links=list(dict.fromkeys(document_urls))))
         if following is None or (not verify_all_pages and max_tenders == sampled):
             break
         page_url = following
@@ -290,6 +316,38 @@ async def run_recipe(
         if not tenders or (skipped >= 2 and skipped * 5 > sampled):
             raise RecipeReadError(message)
     return tenders
+
+
+def _attachment_links(source: html.HtmlElement, base_url: str) -> list[str]:
+    """Recover file links with positive evidence on the selected row or notice."""
+    links = []
+    for anchor in source.xpath(
+        "descendant-or-self::a[@href]"
+        "[not(ancestor::nav or ancestor::footer or ancestor::aside or ancestor::*[@role='navigation'])]"
+    ):
+        url = _resolve_http_url(base_url, anchor.get("href", ""))
+        if not url:
+            continue
+        labels = [anchor.text_content(), anchor.get("title", ""), *anchor.xpath(".//img/@alt | .//span/@title")]
+        if (
+            "download" in anchor.attrib or "enclosure" in anchor.get("rel", "").lower().split()
+            or anchor.get("type", "").lower() in {"application/pdf", "application/zip", "application/octet-stream"}
+            or _FILE_SUFFIX.search(urlsplit(url).path)
+            or any(_FILE_LABEL.search(" ".join(label.split())) for label in labels)
+        ):
+            links.append(url)
+    return links
+
+
+def _prefer_ezak_file_links(selected: list[str], observed: list[str]) -> list[str]:
+    """An E-ZAK document details page can sit beside the direct file for the same record."""
+    direct_ids = {
+        match[1] for url in observed if (match := _EZAK_FILE.search(urlsplit(url).path))
+    }
+    return [
+        url for url in selected
+        if not (match := _EZAK_DOCUMENT_PAGE.search(urlsplit(url).path)) or match[1] not in direct_ids
+    ]
 
 
 def _title_link(

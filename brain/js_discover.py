@@ -186,8 +186,9 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = 
         if (requests < _MAX_REQUESTS and cancelled is None and request.method == "POST"
                 and request.resource_type in {"xhr", "fetch"} and (target is None or request.url == target)):
             search = ObservedSearch.observe(url, request, visit, source_total)
-            # One GraphQL URL serves several operations; the body tells them apart.
-            key = (request.url, request.post_data)
+            # One GraphQL URL serves several operations; the body tells them apart. Only an
+            # observed search has a text body: other POSTs may be compressed or binary.
+            key = (request.url, request.post_data) if search is not None else None
             if search is not None and key not in post_replies:
                 requests += 1
                 try:

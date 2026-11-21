@@ -17,9 +17,10 @@ from brain.learn import (
 )
 from brain.llm import ScopedLLM
 from brain.normalize import _single_text
+from brain.public_search import api_subdomain
 from brain.run_recipe import (
     Origin, PaginationError, RecipeReadError, _field_value, _navigation_url, _observed_href, _selector,
-    canonical_origin, document_base, fetch_page, is_json_response, portal_origin,
+    document_base, fetch_page, is_json_response, portal_origin,
 )
 
 MAX_TRIES = 3
@@ -113,15 +114,17 @@ async def repair(
     if origin is None:
         return None
     discovery_url = portal_url or recipe.list_.url
-    if recipe.kind == "json_api" and (entry_origin := portal_origin(discovery_url)) != origin:
-        if entry_origin is None or not canonical_origin(entry_origin, origin):
+    entry_origin = portal_origin(discovery_url)
+    if recipe.kind == "json_api" and entry_origin != origin and not api_subdomain(entry_origin, origin):
+        if entry_origin is None:
             return None
         try:
             response = await fetch_page(fetch, discovery_url, entry_origin, entry_redirects=True)
         except (RecipeReadError, httpx.HTTPError):
             return None
         discovery_url = str(response.url)
-        if portal_origin(discovery_url) != origin:
+        entry_origin = portal_origin(discovery_url)
+        if entry_origin != origin and not api_subdomain(entry_origin, origin):
             return None
     stored_ids = StoredTenderIds.from_tenders(stored_tenders, recipe) if stored_tenders else None
     html_listing = None
@@ -161,7 +164,9 @@ async def repair(
             if candidate is None:
                 feedback.append("the public JSON list could not be rediscovered")
                 continue
-            if portal_origin(candidate.list_.url) != origin:
+            feed_origin = portal_origin(candidate.list_.url)
+            page_origin = portal_origin(discovery_url)
+            if feed_origin != page_origin and not api_subdomain(page_origin, feed_origin):
                 raise RecipeValidationError("discovered JSON URL belongs to another portal")
             await validate_candidate(
                 candidate, fetch, expected_document_ids=health.missing_document_ids, stored_ids=stored_ids

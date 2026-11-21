@@ -364,6 +364,8 @@ def test_captcha_page_is_reported_as_blocked() -> None:
 
 @pytest.mark.parametrize(("value", "locale", "expected"), [
     ("09.12.2026, 10:00 Uhr", Locale(lang="de", tz="Europe/Berlin"), "2026-12-09T10:00:00+01:00"),
+    ("01.12.2026 09:00", Locale(country="CZ"), "2026-12-01T09:00:00+01:00"),
+    ("04.12.2026 10:00", Locale(lang="cs", tz="Europe/Prague"), "2026-12-04T10:00:00+01:00"),
     ("30.11.2026, 10:00h", Locale(lang="de", tz="Europe/Berlin"), "2026-11-30T10:00:00+01:00"),
     ("9 décembre 2026, 10h30", Locale(lang="fr", tz="Europe/Paris"), "2026-12-09T10:30:00+01:00"),
     ("9 de diciembre de 2026, 10:00", Locale(lang="es", tz="Europe/Madrid"), "2026-12-09T10:00:00+01:00"),

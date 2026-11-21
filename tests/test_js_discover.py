@@ -98,6 +98,34 @@ def test_windows_selector_loop_errors_before_starting_playwright(monkeypatch):
         runner.run(exercise())
 
 
+def test_compressed_post_bodies_do_not_stop_discovery(monkeypatch):
+    # TED's pages POST gzip bodies. Reading them as text crashed the whole browser discovery,
+    # both for ignored POSTs and for ones that look like a replayable search.
+    monkeypatch.setattr(js_discover, "_JSON_WAIT_SECONDS", 3)
+    monkeypatch.setattr(js_discover, "_EXTRA_CAPTURE_SECONDS", 0.05)
+
+    async def exercise():
+        await require_chromium()
+        fetcher = FixtureFetcher({
+            f"{BASE}/tenders": """<script>
+                const body = new Uint8Array([31, 139, 8, 0, 0, 0, 0, 0, 0, 3]);
+                const headers = {"Content-Type": "application/json"};
+                Promise.allSettled([
+                    fetch('/api/events', {method: 'POST', headers, body}),
+                    fetch('/api/search', {method: 'POST', headers, body}),
+                ]).then(() => fetch('/api/tenders'));
+            </script>""",
+            f"{BASE}/api/tenders": json.dumps({"items": [{"id": "SPA-1", "title": "Library repairs"}]}),
+        })
+        try:
+            found = await js_discover._capture_json(f"{BASE}/tenders", fetcher.for_portal("fixture"))
+            assert [key for key, _ in found] == [f"{BASE}/api/tenders"]
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
+
+
 def test_discover_and_replay_public_json_feed_after_config_responses(monkeypatch):
     monkeypatch.setattr(js_discover, "_EXTRA_CAPTURE_SECONDS", 0.05)
     monkeypatch.setattr(js_discover, "_JSON_WAIT_SECONDS", 3)
@@ -170,15 +198,16 @@ def test_discover_and_replay_public_json_feed_after_config_responses(monkeypatch
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("redirected", [False, True])
-def test_repair_rediscovers_moved_json_feed_from_original_entry(monkeypatch, redirected):
+@pytest.mark.parametrize(("redirected", "subdomain"), [(False, False), (True, False), (False, True)])
+def test_repair_rediscovers_moved_json_feed_from_original_entry(monkeypatch, redirected, subdomain):
     monkeypatch.setattr(js_discover, "_EXTRA_CAPTURE_SECONDS", 0.05)
     monkeypatch.setattr(js_discover, "_JSON_WAIT_SECONDS", 3)
-    base = "https://www.portal.example" if redirected else BASE
-    old_url = f"{base}/api/tenders-old"
+    base = "https://www.portal.example" if redirected else ("https://portal.example" if subdomain else BASE)
+    feed = "https://api.portal.example" if subdomain else base
+    old_url = f"{feed}/api/tenders-old"
     entry_url = f"{base}/tenders"
-    original_url = f"{BASE}/tenders"
-    new_url = f"{base}/api/tenders"
+    original_url = f"{BASE}/tenders" if redirected else entry_url
+    new_url = f"{feed}/api/tenders"
     previous = Recipe.model_validate({
         "kind": "json_api", "list": {"url": old_url, "item": "$.items[*]"},
         "fields": {"id": "$.id", "title": "$.title"},
@@ -207,10 +236,11 @@ def test_repair_rediscovers_moved_json_feed_from_original_entry(monkeypatch, red
                 return httpx.Response(301, headers={"location": entry_url})
             if url == entry_url:
                 return httpx.Response(
-                    200, headers={"content-type": "text/html"}, text="<script>fetch('/api/tenders')</script>",
+                    200, headers={"content-type": "text/html"}, text=f"<script>fetch('{new_url}')</script>",
                 )
             assert url == new_url
-            return httpx.Response(200, json={"items": [{"id": "NEW-1", "title": "Roof replacement"}]})
+            return httpx.Response(200, headers={"Access-Control-Allow-Origin": base},
+                                  json={"items": [{"id": "NEW-1", "title": "Roof replacement"}]})
 
         fetcher = Fetcher(min_interval=0, transport=httpx.MockTransport(respond))
         try:

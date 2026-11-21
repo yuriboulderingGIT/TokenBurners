@@ -47,6 +47,20 @@ log = logging.getLogger("watchtower.worker")
 _TEMPORARY_ATTACH = "could not attach (temporary portal error): "
 
 
+def _documents_unverified(recipe: Recipe, tenders: list[Tender]) -> bool:
+    """A read without document links, that never looked where the documents usually are.
+
+    Documents live on a tender's own page. If the recipe opened each page (detail.link) and found
+    no file, the listing is document-free by evidence. If the tenders have own pages the recipe
+    never opened, or several tenders share one address (a preview without notice pages), the
+    documents were simply not reached.
+    """
+    if recipe.detail.link is not None:
+        return False
+    urls = [tender.url for tender in tenders]
+    return len(set(urls)) < len(urls) or any(url != recipe.list_.url for url in urls)
+
+
 class Worker:
     def __init__(self, db: DB, fetcher: Fetcher, llm: LLM) -> None:
         self.db = db
@@ -187,8 +201,28 @@ class Worker:
                         portal_id, result.tenders, repaired_recipe=repaired_recipe, repair_cost_usd=repair_cost_usd,
                     )
                     files = sum(len(tender.documents) for tender in result.tenders)
-                    file_label = "document" if files == 1 else "documents"
-                    reason = f"delivering {count} tenders. Latest read verified {files} {file_label}"
+                    no_links = bool(result.tenders) and not files and not result.tender_ids_with_document_links
+                    if no_links and _documents_unverified(recipe, result.tenders):
+                        # The read never opened the pages where documents usually are, so "no files"
+                        # is not established. Say so; the tenders stay available. No repair: a timed
+                        # plain read checks again for free.
+                        reason = (
+                            f"no documents: {count} tenders delivered, but their documents were not found. "
+                            "They may sit on tender pages the recipe does not open, behind a login, "
+                            "or on another website"
+                        )
+                        states.set_state(self.db, portal_id, states.FAILED, reason, run_id)
+                        self.db.run_finish(run_id, "failed", "read ok, but no tender documents were found", cost)
+                        return False
+                    reason = f"delivering {count} tenders"
+                    if files:
+                        file_label = "document" if files == 1 else "documents"
+                        reason += f". Latest read verified {files} {file_label}"
+                    elif result.documents_tried:
+                        # Files over 250 MB may be left out (track rules); failed downloads fail health.
+                        reason += ". No documents delivered within the file limit"
+                    else:
+                        reason += ". No document links found"  # the tender pages were read and show no files
                     states.set_state(self.db, portal_id, states.SERVING, reason, run_id)
                     self.db.run_finish(run_id, "ok", cost_usd=cost)
                     return True

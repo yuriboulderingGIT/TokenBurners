@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -85,7 +86,14 @@ def test_document_selector_change_preserves_files_during_repair(portal, monkeypa
 
     def detail(tender_id, layout):
         page = render(tender_id, layout)
-        return page.replace('<a href="/download/', f'<a class="{link_class}" href="/download/') if page else page
+        if page is None:
+            return None
+        # This variant has no generic file marker. Only the recipe identifies the links.
+        return re.sub(
+            r'<a href="/download/([^/]+)/([^"]+)">[^<]+</a>',
+            rf'<a class="{link_class}" href="/dl?tender=\1&amp;file=\2">Open</a>',
+            page,
+        )
 
     monkeypatch.setattr(server, "render_detail", detail)
     previous = db.recipe_latest(portal_id)
