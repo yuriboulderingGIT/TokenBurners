@@ -46,7 +46,7 @@ DOC_REVALIDATIONS_PER_READ = int(os.getenv("DOC_REVALIDATIONS_PER_READ", "30"))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 OPENAI_MODEL_STRONG = os.getenv("OPENAI_MODEL_STRONG", "gpt-5")
 LLM_BUDGET_USD = float(os.getenv("LLM_BUDGET_USD", "5"))
-# Disk cache of model answers, for free reruns while developing (.env.example turns it on).
+# Optional disk cache of initial model answers, for free reruns while developing.
 # Off by default: answers are cached before anyone knows they were good, so in production a
 # failed attach would replay the same bad answers on every retry.
 LLM_CACHE = os.getenv("LLM_CACHE", "0") == "1"

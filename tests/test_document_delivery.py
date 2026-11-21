@@ -10,13 +10,16 @@ import json
 
 import pytest
 
+from app.db import DB
 from app.fetcher import FakeFetcher
 from app.models import Recipe
+from app.worker import Worker
 from brain.learn import InvalidListingSample, learn_recipe, validate_candidate
 from brain.run_recipe import run_recipe
 
 URL = "https://portal.example/tenders"
 LIST_ONLY = {
+    "locale": {"tz": "Europe/London"},
     "list": {"url": URL, "item": "//tr[@data-id]"},
     "fields": {"id": "./@data-id", "title": "./td[1]/a", "submissionDeadline": "./td[2]"},
 }
@@ -137,3 +140,33 @@ def test_retry_that_still_misses_documents_keeps_the_working_recipe_and_never_es
     recipe, rows = _attach(_pages(with_files=True), model)
     assert recipe.documents.link is None and [row.fields["id"] for row in rows] == ["T1", "T2", "T3"]
     assert [strong for strong, _ in model.calls] == [False, False]  # at most one extra, cheap call
+
+
+@pytest.mark.parametrize("link", [True, False], ids=["declared-file-url", "script-only"])
+def test_document_button_cannot_turn_into_a_false_empty_delivery(tmp_path, link):
+    pages = _pages(with_files=False)
+    for i in (1, 2, 3):
+        page = f"https://portal.example/notice/{i}"
+        attribute = f'data-download-url="/docs/roof-{i}.pdf"' if link else 'onclick="openDownload()"'
+        pages[page] = pages[page].replace("<p>No files.</p>", f"<button {attribute}>Download tender documents</button>")
+    db = DB(tmp_path / "buttons.db")
+    pid = db.portal_create(URL)
+    db.recipe_save(pid, Recipe.model_validate(WITH_DOCUMENTS), "attach", 0)
+    db.portal_update(pid, state="failed")
+
+    async def exercise():
+        fetcher = FakeFetcher(pages)
+        try:
+            worker = Worker(db, fetcher, llm=None)
+            worker.request_read(pid)
+            await worker._handle(*worker.queue.get_nowait())
+            portal = db.portal_get(pid)
+            if link:
+                assert portal["state"] == "serving"
+                assert [len(row["documents"]) for row in db.tenders_for(pid)] == [1, 1, 1]
+            else:
+                assert portal["state"] == "failed" and "document download button" in portal["reason"]
+                assert db.tenders_for(pid) == []
+        finally:
+            await fetcher.aclose()
+    asyncio.run(exercise())

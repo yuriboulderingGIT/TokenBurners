@@ -157,7 +157,8 @@ async def store_documents(
             continue
         try:
             entries, skipped = await asyncio.to_thread(
-                _finalize, downloaded.path, name, downloaded.size_bytes, downloaded.sha256, portal_dir
+                _finalize, downloaded.path, name, downloaded.size_bytes, downloaded.sha256, portal_dir,
+                (urlsplit(url).hostname or "").rsplit(".", 1)[-1].lower(),
             )
         except OSError as e:
             downloaded.path.unlink(missing_ok=True)
@@ -302,12 +303,12 @@ class _LimitExceeded(Exception):
     pass
 
 
-def _finalize(path: Path, name: str, size: int, sha256: str, portal_dir: Path) -> tuple[list[_Entry], int]:
+def _finalize(path: Path, name: str, size: int, sha256: str, portal_dir: Path, country: str = "") -> tuple[list[_Entry], int]:
     """Move a download into place, or unpack it when it is an archive. Returns (files, skipped)."""
     portal_dir.mkdir(parents=True, exist_ok=True)
     if _is_archive(path, name):
         budget = _Budget()
-        members = _unpack(path, portal_dir, 1, budget)
+        members = _unpack(path, portal_dir, 1, budget, country)
         if members:
             path.unlink(missing_ok=True)
             return members, budget.skipped
@@ -331,13 +332,41 @@ def _is_archive(path: Path, name: str) -> bool:
         return False
 
 
-def _unpack(archive_path: Path, out_dir: Path, depth: int, budget: _Budget) -> list[_Entry]:
+def _zip_name(info: zipfile.ZipInfo, country: str) -> str:
+    name = info.filename
+    if info.flag_bits & 0x800:
+        return name
+    try:
+        raw = name.encode("cp437")
+    except UnicodeEncodeError:
+        return name  # Newer ZIP readers already apply the Unicode Path extra field.
+    # Honor the Info-ZIP Unicode Path field only when it names this exact member.
+    extra = info.extra
+    while len(extra) >= 4:
+        size = int.from_bytes(extra[2:4], "little")
+        payload = extra[4:4 + size]
+        if (extra[:2] == b"up" and len(payload) == size and size > 5 and payload[0] == 1
+                and int.from_bytes(payload[1:5], "little") == zlib.crc32(raw)):
+            try:
+                return payload[5:].decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        extra = extra[4 + size:]
+    # A legacy DOS name can decode into box-drawing or mathematical symbols under CP437.
+    if not name.isascii() and country in {"cz", "sk", "pl", "hu"}:
+        decoded = raw.decode("cp852")
+        if sum(c.isalpha() for c in decoded) > sum(c.isalpha() for c in name):
+            return decoded
+    return name
+
+
+def _unpack(archive_path: Path, out_dir: Path, depth: int, budget: _Budget, country: str) -> list[_Entry]:
     entries: list[_Entry] = []
     try:
         with zipfile.ZipFile(archive_path) as archive:
             members = [info for info in archive.infolist() if not info.is_dir()]
             for info in members[:MAX_ZIP_MEMBERS]:
-                name = _member_name(info.filename)
+                name = _member_name(_zip_name(info, country))
                 if name is None:
                     continue
                 if info.file_size > MAX_DOC_BYTES or info.file_size > budget.remaining:
@@ -356,7 +385,7 @@ def _unpack(archive_path: Path, out_dir: Path, depth: int, budget: _Budget) -> l
                     continue
                 budget.remaining -= size
                 if depth < MAX_ZIP_DEPTH and _is_archive(target, name):
-                    inner = _unpack(target, out_dir, depth + 1, budget)
+                    inner = _unpack(target, out_dir, depth + 1, budget, country)
                     if inner:
                         target.unlink(missing_ok=True)
                         entries.extend(inner)

@@ -23,7 +23,7 @@ If the key is missing, set it in your private `.env`, then recreate the containe
 
 A regular read runs the saved recipe in plain code. Watchtower spaces requests from each portal and to each destination host, including document downloads and redirects. It checks identifiers, field coverage, listing counts and document delivery. If a recipe breaks, the portal enters `healing` and continues to serve its last healthy snapshot. A successful repair restores delivery. Login and captcha gates produce `failed` with a reason.
 
-Each read checks up to 30 known documents again, starting with those checked longest ago (`DOC_REVALIDATIONS_PER_READ`). A check uses the ETag or Last-Modified date. A file with neither is downloaded again after 15 minutes, and any file is downloaded in full after 24 hours. A revised document gets a new file link, and older links keep serving their revision. If a check fails, the last verified file stays in the delivery.
+Each read checks up to 30 known documents again, starting with those checked longest ago (`DOC_REVALIDATIONS_PER_READ`). A check uses the ETag or Last-Modified date. A file with neither is downloaded again after 15 minutes, and any file is downloaded in full after 24 hours. A revised document gets a new file link, and older links keep serving their revision. If a check fails, the last verified file stays in the delivery. Watchtower unpacks ordinary ZIPs and delivers split archives such as `.zip.001` and `.zip.002` as individual files.
 
 A tender the portal no longer lists is kept and marked `closed`. A listing that only shows the latest results also drops tenders that are still open. There a tender stays `open` until its own page shows it closed or withdrawn, or its deadline passes. The dashboard shows since when each tender has been absent from the listing.
 
@@ -49,7 +49,7 @@ reported separately because some portals make their notices public but restrict 
 | `OPENAI_API_KEY` | required | Project key used for learning and repair |
 | `OPENAI_MODEL` / `OPENAI_MODEL_STRONG` | `gpt-5-mini` / `gpt-5` | Attach and repair models |
 | `LLM_BUDGET_USD` | `5` | Maximum cumulative modeled spend per persistent data folder, including reservations |
-| `LLM_CACHE` | `0` | `1` reuses identical model answers (development only: a bad answer would repeat on every retry) |
+| `LLM_CACHE` | `0` | Set to 1 to reuse initial attach answers in development. Repairs, relearns and failed-attach retries request fresh answers. |
 | `REFRESH_MINUTES` / `FAILED_RETRY_MINUTES` | `15` / `180` | Healthy refresh and failed-portal retry intervals |
 | `REFRESH_REPAIR_MINUTES` | `60` | A refresh of a failed portal starts a model repair or a new attach at most this often |
 | `DOC_REVALIDATIONS_PER_READ` | `30` | Known documents checked again per read, stalest first |
@@ -64,6 +64,8 @@ Portals may run on a private network, so Watchtower reaches any address by defau
 Use a dedicated funded API project for hand-in. Suggested budgets are $5 for development and a $12 project limit with `LLM_BUDGET_USD=10` for judging. The application budget applies to a single data folder. Give the judges the project key privately. [Project and spending controls](https://help.openai.com/en/articles/9186755-managing-projects-in-the-api-platform)
 
 ## Measured model cost
+
+On 21 November a fresh URL-only attach to the simulated judge's hard fixture took two GPT-5-mini calls and cost **$0.004549**. The API delivered all seven expected IDs and all 21 files. The file bytes, deadlines and statuses matched the fixture. An earlier attempt during debugging cost **$0.006091** and published zero tenders. [Original mock judging report](judge/JUDGE_REPORT.md) · [Repeatable fixture checks](tests/test_judge_regressions.py)
 
 On 20 November the real model attached to the mock for **$0.005485** and delivered five tenders with eight documents. A regular refresh of those tenders cost **$0** (zero model calls). After a layout change, one GPT-5 repair cost **$0.028319** and restored the same five IDs and eight documents. The successful Cyprus attach cost **$0.019190** for ten tenders and four documents. These are individual measurements. Across the ten public portals, one reached `serving` and nine failed. The report includes spend on unsuccessful attempts. [A1/A2 live results](testset/results.md) · [Earlier B14 live results](testset/b14-results.md)
 

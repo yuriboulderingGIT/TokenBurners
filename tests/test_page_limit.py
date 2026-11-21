@@ -28,7 +28,7 @@ def _pages(count: int) -> dict[str, str]:
         following = f'<a rel="next" href="{URL}?page={n + 1}">Next</a>' if n < count else ""
         pages[url] = (
             f'<table><tr data-id="T{n}"><td><a href="/notice/{n}">Roof {n}</a></td>'
-            f"<td>2026-12-01 12:00</td></tr></table>{following}"
+            f"<td>2026-12-01T12:00:00Z</td></tr></table>{following}"
         )
     return pages
 

@@ -191,7 +191,7 @@ def test_worker_repairs_from_a_stored_tender_after_new_rows_and_navigation(tmp_p
                 assert db.portal_get(portal)["state"] == "serving"
                 assert {t["id"] for t in db.tenders_for(portal)} == {f"REF-{key}" for key in keys}
             else:
-                assert model.attempts == 3 and db.recipe_latest(portal).version == 1
+                assert model.attempts == 2 and db.recipe_latest(portal).version == 1
                 assert db.portal_get(portal)["state"] == "failed"
                 assert db.tenders_for(portal) == before
         finally:

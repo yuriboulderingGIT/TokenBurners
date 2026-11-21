@@ -36,6 +36,11 @@ _JSON_WAIT_SECONDS = 18  # the least time to wait for a feed after the page load
 _QUIET_SECONDS = 4.0
 _EXTRA_CAPTURE_SECONDS = 1.25
 _BROWSER_REQUESTS = {"document", "script", "xhr", "fetch"}
+_TRACKER_HOSTS = (
+    "googletagmanager.com", "google-analytics.com", "clarity.ms", "matomo.cloud",
+    "skyra.no", "skyra.io", "cookiebot.com", "cookielaw.org", "onetrust.com",
+)
+_TRACKER_SCRIPT = re.compile(r"(?:^|/)(?:matomo|piwik|heatmap|gtag|clarity)(?:[.-][^/]*)?\.js$", re.I)
 _JSON_REQUESTS = {"document", "xhr", "fetch"}
 _FEED_LABELS = {
     "tenders", "notices", "procurements", "opportunities", "solicitations",
@@ -231,6 +236,11 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: SearchTranspo
     async def serve(route: Route) -> None:
         nonlocal requests, document_block, cancelled, source_total, search_problem
         request = route.request
+        host = (urlsplit(request.url).hostname or "").lower().rstrip(".")
+        if (any(host == domain or host.endswith("." + domain) for domain in _TRACKER_HOSTS)
+                or (request.resource_type == "script" and _TRACKER_SCRIPT.search(urlsplit(request.url).path))):
+            await route.abort()
+            return
         await adopt_page_cookies(request.url)
         if (requests < _MAX_REQUESTS and cancelled is None and request.method == "POST"
                 and request.resource_type in {"xhr", "fetch"}):
@@ -290,7 +300,7 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: SearchTranspo
                            if _FORWARDED_HEADERS.fullmatch(k) or ANTI_FORGERY_HEADERS.fullmatch(k)}
                 load = fetch_page(visit, request.url, request_origin, headers=headers)
             else:
-                load = fetch.get(request.url)
+                load = fetch_page(fetch, request.url, request_origin)
             response = await asyncio.wait_for(load, timeout=_PAGE_LOAD_SECONDS)
             if not response.is_success:
                 await route.abort()
