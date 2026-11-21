@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS recipes (
     model_cost_usd REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (portal_id, version)
 );
+CREATE TABLE IF NOT EXISTS attach_notice_checkpoints (
+    portal_id TEXT NOT NULL, fingerprint TEXT NOT NULL, raw TEXT NOT NULL, saved_at INTEGER NOT NULL,
+    PRIMARY KEY (portal_id, fingerprint)
+);
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
     portal_id TEXT NOT NULL,
@@ -170,6 +174,8 @@ class DB:
         if "request_count" not in {row["name"] for row in self._conn.execute("PRAGMA table_info(runs)")}:
             self._conn.execute("ALTER TABLE runs ADD COLUMN request_count INTEGER")
         self._quarantine_legacy_categories()
+        if "last_access_check" not in {r["name"] for r in self._conn.execute("PRAGMA table_info(document_sources)")}:
+            self._conn.execute("ALTER TABLE document_sources ADD COLUMN last_access_check REAL NOT NULL DEFAULT 0")
         self._quarantine_unverified_reads()
 
     def _quarantine_unverified_reads(self) -> None:

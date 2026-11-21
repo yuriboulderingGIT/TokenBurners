@@ -138,7 +138,8 @@ def normalize(raw: RawTender, locale: Locale) -> Tender | None:
     deadline_text = _single_text(fields.get("submissionDeadline"))
     deadline = _deadline(deadline_text, locale)
     deadline_day = _parse_date(deadline_text, locale) if deadline is None and deadline_text else None
-    status = _status(_single_text(fields.get("status")) or "", deadline, deadline_day)
+    source_status = _single_text(fields.get("status")) or ""
+    status = _status(locale.status_labels.get(source_status, source_status), deadline, deadline_day)
     return Tender(
         id=tender_id,
         url=raw.url,
@@ -149,8 +150,8 @@ def normalize(raw: RawTender, locale: Locale) -> Tender | None:
         status=status,
         referenceNumber=_single_text(fields.get("referenceNumber")),
         description=_text(fields.get("description")),
-        procedureType=_PROCEDURES.get(_label(fields.get("procedureType"))),
-        contractNature=_NATURES.get(_label(fields.get("contractNature"))),
+        procedureType=locale.procedure_labels.get(_single_text(fields.get("procedureType"))) or _PROCEDURES.get(_label(fields.get("procedureType"))),
+        contractNature=locale.nature_labels.get(_single_text(fields.get("contractNature"))) or _NATURES.get(_label(fields.get("contractNature"))),
         cpvCodes=_cpv(fields.get("cpvCodes")),
         placeOfPerformance=_performance_place(fields),
     )
@@ -211,6 +212,16 @@ def _parse_date(value: str | None, locale: Locale) -> datetime | None:
 
 def _deadline(value: str | None, locale: Locale) -> datetime | None:
     zone = locale.tz or _COUNTRY_ZONES.get((locale.country or "").upper())
+    parsed = None
+    fmt = locale.deadline_format
+    if value:
+        value = "".join(str(unicodedata.decimal(ch)) if ch.isdecimal() and not ch.isascii() else ch for ch in value)
+    if (value and fmt and len(value) <= 180 and {"%Y", "%m", "%d", "%H", "%M"}.issubset(re.findall(r"%[A-Za-z]", fmt))
+            and not re.search(r"%(?![YmdHMSz%])", fmt)):
+        try:
+            parsed = datetime.strptime(value.strip(), fmt)
+        except ValueError:
+            pass
     if value:
         local_zone = _LOCAL_ZONE.search(value)
         if local_zone:
@@ -224,9 +235,15 @@ def _deadline(value: str | None, locale: Locale) -> datetime | None:
                 locale = locale.model_copy(update={"country": country})
         # Charité and similar German listings write local times as "10:00h".
         value = re.sub(r"(\b\d{1,2}:\d{2})\s*(?:h|Uhr)\b", r"\1", value, flags=re.I)
-    if not value or not _CLOCK.search(value):
+    if not value or (parsed is None and not _CLOCK.search(value)):
         return None
-    parsed = _parse_date(value, locale)
+    if parsed is None:
+        parsed = _parse_date(value, locale)
+    if parsed is None and (match := re.search(
+            r"(?<!\d)(\d{1,2}[./-]\d{1,2}[./-]\d{4})[^\d+:\-]{1,18}(\d{1,2})[:h](\d{2})(?!\d)", value, re.I)):
+        # Keep explicit offsets authoritative; do not silently strip an unknown zone.
+        if not value[match.end():].strip():
+            parsed = _parse_date(f"{match[1]} {match[2]}:{match[3]}", locale)
     if parsed is None or parsed.tzinfo is not None:
         return parsed
     if not zone:

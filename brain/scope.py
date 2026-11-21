@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Iterable
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit
 
 from app.models import Recipe
 
@@ -147,6 +147,62 @@ def _window_or_archive(labels: Iterable[str]) -> bool:
 
 def scope_known(scope: str | None) -> bool:
     return bool(scope) and scope != _UNKNOWN
+
+
+def archive_open_view(page, source: str) -> str | None:
+    """Use an observed aggregate status control in a public GET form on this listing.
+
+    Restrict the change to the status value. Keep the original query, buyer, region
+    and all successful form defaults. A single procurement phase is not an aggregate.
+    """
+    if page is None:
+        return None
+    original = urlsplit(source)
+    initial = dict(parse_qsl(original.query, keep_blank_values=True))
+    for form in page.xpath("//form[.//select]"):
+        action = urlsplit(urljoin(source, form.get("action") or source))
+        if ((action.scheme, action.netloc, action.path) != (original.scheme, original.netloc, original.path)
+                or form.get("method", "get").lower() != "get" or action.fragment
+                or any(k.startswith("on") for k in form.attrib)):
+            continue
+        defaults = dict(parse_qsl(action.query, keep_blank_values=True))
+        choice = None
+        for node in form.xpath(".//input[@name] | .//select[@name] | .//textarea[@name]"):
+            name = node.get("name")
+            kind = node.get("type", "text").lower()
+            if node.xpath("ancestor-or-self::*[@disabled]") or kind in {"submit", "button"}:
+                continue
+            if name in defaults or "form" in node.attrib or _SENSITIVE.search(name):
+                break
+            if node.tag == "select" and "multiple" not in node.attrib:
+                options = node.xpath("./option[not(@disabled)] | ./optgroup[not(@disabled)]/option[not(@disabled)]")
+                if not options:
+                    break
+                selected = next((o for o in options if "selected" in o.attrib), options[0])
+                value = selected.get("value", selected.text_content())
+                if _key(name) in _STATUS:
+                    # In a long list of phases, aggregate options precede a disabled divider.
+                    group = node.xpath("./option[@disabled][1]/preceding-sibling::option")
+                    eligible = group or (options if len(options) <= 5 else [])
+                    codes = {o.get("value", "").casefold(): o.get("value") for o in eligible}
+                    opened = [codes[k] for k in ("active", "open", "current", "ongoing") if k in codes]
+                    if (len(opened) == 1 and set(codes) & {"finished", "closed", "inactive"}
+                            and initial.get(name, value).casefold() in {"", "*", "all"}):
+                        choice = (name, opened[0])
+            elif node.tag == "input" and kind in {"checkbox", "radio"} and "checked" not in node.attrib:
+                continue
+            elif node.tag == "input" and kind in {"hidden", "text", "search", "radio", "checkbox"}:
+                value = node.get("value", "")
+            else:
+                break
+            defaults[name] = value
+        else:
+            if choice and all(k not in defaults or defaults[k] == v for k, v in initial.items()):
+                params = {**defaults, **initial, choice[0]: choice[1]}
+                target = action._replace(query=urlencode(params)).geturl()
+                if len(target) <= 4096 and navigation_preserves_scope(source, target):
+                    return target
+    return None
 
 
 def is_results_window(scope: str | None) -> bool:

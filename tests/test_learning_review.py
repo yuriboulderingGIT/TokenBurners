@@ -120,7 +120,7 @@ def test_attach_keeps_repeated_page_failure_when_later_selectors_miss(monkeypatc
             return {"list": {"url": _LIST, "item": "//li" if len(feedback) == 1 else "//article",
                              "next_page": None if len(feedback) == 1 else "//a[@rel='next']/@href"}}
 
-    async def no_feed(*_args):
+    async def no_feed(*_args, **_kwargs):
         return []
 
     monkeypatch.setattr("brain.js_discover._capture_json", no_feed)
@@ -170,7 +170,7 @@ def test_script_shell_checks_feed_without_requesting_html_selectors(monkeypatch,
             return {"endpoint": 0, "recipe": {"list": {"item": "$.items[*]"},
                                               "fields": {"id": "$.id", "title": "$.title"}}}
 
-    async def capture(url, fetch):
+    async def capture(url, fetch, **kwargs):
         assert url == _LIST
         return [(feed, payload)] if has_feed else []
 
@@ -201,7 +201,7 @@ def test_landing_links_to_listing_with_script_only_next_control(monkeypatch):
             assert "entry" in json.loads(prompt)
             return {"list_url": listing}
 
-    async def capture(url, fetch):
+    async def capture(url, fetch, **kwargs):
         assert url == listing
         return []
 

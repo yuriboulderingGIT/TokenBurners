@@ -20,9 +20,23 @@ Checks:
 """
 
 from collections import Counter
+import re
 from datetime import datetime, timezone
 
-from app.models import Health, ReadResult, Tender
+from app.models import Health, RawTender, ReadResult, Tender
+
+
+def clean_short_fields(rows: list[RawTender]) -> dict[str, int]:
+    """Discard implausible short fields and retain the evidence for the health decision."""
+    invalid = Counter()
+    for row in rows:
+        for field in ("title", "buyerName", "referenceNumber"):
+            value = row.fields.get(field)
+            text = " ".join(value) if isinstance(value, list) else value
+            if text and (len(text) > 500 or re.search(r"<(?:script|style)\b|[.#][\w-]+\s*\{[^}]*:|\bfunction\s*\([^)]*\)\s*\{", text, re.I)):
+                row.fields[field] = None
+                invalid[field] += 1
+    return dict(invalid)
 
 REQUIRED_FIELDS = ("title", "buyerName", "publicationDate", "submissionDeadline")
 MIN_FILL_RATE = 0.8
@@ -50,6 +64,9 @@ def check_health(prev: ReadResult | None, new: ReadResult) -> Health:
         return _sick("no tenders found")
 
     problems: list[str] = []
+    for field, count in new.invalid_fields.items():
+        if count * 2 >= len(tenders):
+            problems.append(f"{field} contained markup or implausible text on {count} of {len(tenders)} notices")
     previous = prev.tenders if prev else []
     problems += _identity_problems(new)
     problems += _fill_problems(tenders, previous)
@@ -71,7 +88,10 @@ def check_health(prev: ReadResult | None, new: ReadResult) -> Health:
                 f"document links disappeared for {len(missing)} of {len(comparable)} continuing "
                 "tenders that previously had documents. Check the documents.link selector"
             )
-    problems += _document_problems(new)
+    document_problems = _document_problems(new)
+    problems += document_problems
+    if new.missing_open_files and not document_problems:
+        problems.append(f"{new.missing_open_files} advertised file(s) for open tenders could not be delivered")
     return Health(ok=not problems, problems=problems, missing_document_ids=missing_document_ids)
 
 
