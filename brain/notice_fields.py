@@ -59,6 +59,39 @@ def _xpath_literal(value: str) -> str:
     return "concat(" + ", \"'\", ".join(f"'{part}'" for part in parts) + ")"
 
 
+def labelled_values(page: html.HtmlElement) -> list[dict[str, str]]:
+    """Collect labels in their original language, including inline label: <b>value</b> pairs."""
+    found = {}
+    for node in page.xpath("//dt[following-sibling::*[1][self::dd]] | //th[following-sibling::*[1][self::td]] | "
+                           "//b[preceding-sibling::text()] | //strong[preceding-sibling::text()]"):
+        if node.xpath("ancestor::nav | ancestor::header | ancestor::footer | ancestor::*[@hidden]"):
+            continue
+        if node.tag in {"dt", "th"}:
+            label = " ".join(node.text_content().split())
+            value = node.getnext()
+            if not isinstance(value, html.HtmlElement):
+                continue
+        else:
+            label = " ".join(node.xpath("string(preceding-sibling::text()[1])").split())
+            if not label.endswith((":", "：")):
+                continue
+            value = node
+        data = " ".join(value.text_content().split())
+        if not (0 < len(label) <= 80 and 0 < len(data) <= 160):
+            continue
+        literal = ("'" + label + "'") if "'" not in label else (
+            '"' + label + '"' if '"' not in label else "concat(" + ",\"'\",".join("'" + s + "'" for s in label.split("'")) + ")")
+        if node.tag in {"dt", "th"}:
+            xpath = f"//{node.tag}[normalize-space(.)={literal}]/following-sibling::*[1]"
+        else:
+            xpath = f"//{node.tag}[normalize-space(preceding-sibling::text()[1])={literal}]"
+        found.setdefault(label, set()).add((data, xpath))
+        if len(found) >= 50:
+            break
+    return [{"label": label, "value": data, "xpath": path} for label, matches in found.items()
+            if len(matches) == 1 for data, path in matches]
+
+
 def listed_deadline_column(row: html.HtmlElement) -> int | None:
     """Use an unambiguous header on a simple results table as independent deadline evidence."""
     table = next(row.iterancestors("table"), None)

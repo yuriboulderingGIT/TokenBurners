@@ -31,7 +31,7 @@ def test_search_replays_html_offsets_without_saving_request_body(monkeypatch):
                               f'<a href="/notice/{offset}">Ouvrir</a><a href="/buyer">Acheteur</a>'
                               '<a href="/spec.pdf">Dossier</a></article>'})
 
-    async def capture(url, fetch, *, target=None):
+    async def capture(url, fetch, *, target=None, llm=None):
         assert url == SOURCE
         request = SimpleNamespace(url=ENDPOINT, headers={"content-type": "application/x-www-form-urlencoded"},
                                   post_data="offset=1&nonce=ephemeral")

@@ -195,6 +195,15 @@ class ScopedLLM:
     def _add_cost(self, cost: float) -> None:
         self.total_cost += cost
 
+    def record_rejection(self, proposal, error: str) -> None:
+        if self.run_id and isinstance(proposal, dict):
+            selectors = {k: proposal[k] for k in ("fields", "detail", "documents") if k in proposal}
+            if isinstance(proposal.get("list"), dict):
+                selectors["list"] = {key: proposal["list"][key] for key in ("item", "next_page", "fields")
+                                     if key in proposal["list"]}
+            self.llm.db.run_note(self.run_id, "Rejected recipe: " + error[:600] + " | " +
+                                 json.dumps(selectors, ensure_ascii=False)[:2500])
+
     async def json(
         self, prompt: str, system: str = "You are a precise web scraping assistant.",
         strong: bool = False, purpose: str | None = None,

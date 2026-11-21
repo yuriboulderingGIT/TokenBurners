@@ -15,13 +15,13 @@ from jsonpath_ng import parse as parse_jsonpath
 from jsonpath_ng.exceptions import JSONPathError
 from lxml import etree, html
 
-from app.fetcher import PortalFetcher
+from app.fetcher import PortalFetcher, RunPageCache
 from app.models import RawTender, Recipe
 from brain import berlin_documents, charite_documents
 from brain.blocks import Blocked, detect_block
 from brain.notice_evidence import json_collection_kinds, non_notice_target, rejection_reason
 from brain.notice_fields import fill_notice_fields, listed_deadline_column, notice_facts
-from brain.normalize import _single_text
+from brain.normalize import _single_text, normalize
 from brain.shrink import shrink
 
 MAX_PAGES = 100
@@ -73,6 +73,10 @@ Origin = tuple[str, str, int]
 
 class RecipeReadError(ValueError):
     """A page or selector prevents the recipe from being read reliably."""
+
+
+class ListingFieldMismatch(RecipeReadError):
+    """Optional listing summaries disagreed with the official notice during sampling."""
 
 
 class _PageGone(RecipeReadError):
@@ -154,6 +158,21 @@ async def run_recipe(
         for name, expression in recipe.fields.items()
     }
     documents = _selector(recipe.kind, recipe.documents.link, "documents.link")
+    index_link = _selector(recipe.kind, recipe.documents.page, "documents.page")
+    attachment_owners: dict[str, str] = {}
+    listing_fields = {k: _selector(recipe.kind, v, f"list.fields.{k}") for k, v in recipe.list_.fields.items()}
+    scan_archive = recipe.kind == "html" and not recipe.list_.search and bool(
+        {"submissionDeadline", "status"} & listing_fields.keys())
+    if scan_archive and max_tenders is None and not isinstance(fetch, RunPageCache):
+        wrapped = RunPageCache(fetch.fetcher, fetch.portal_id)
+        wrapped.progress = getattr(fetch, "progress", None)
+        fetch = wrapped
+    if scan_archive and max_tenders is None and page_url not in fetch.scanned_pages:
+        await run_recipe(recipe, fetch, max_tenders=3, verify_all_pages=True)
+    large_archive = scan_archive and isinstance(fetch, RunPageCache) and fetch.scanned_pages.get(page_url, 0) >= 4
+    resume = large_archive and max_tenders is None and getattr(fetch, "staged_notice", None)
+    recipe_digest = hashlib.sha256(recipe.model_dump_json(by_alias=True).encode()).digest() if resume else b""
+    checkpoint = getattr(fetch, "progress", None)
 
     tenders: list[RawTender] = []
     seen_pages: set[str] = set()
@@ -170,7 +189,8 @@ async def run_recipe(
     if recipe.list_.search:
         from brain.public_search import SearchPages
         search_pages = await SearchPages.open(page_url, recipe.list_.search, fetch)
-    for page_number in range(1, recipe.list_.max_pages + 1):
+    page_limit = 1000 if scan_archive and recipe.list_.max_pages == MAX_PAGES else recipe.list_.max_pages
+    for page_number in range(1, page_limit + 1):
         if search_pages:
             page = await search_pages.read(page_number, observed_count)
             advertised_count = search_pages.total
@@ -252,6 +272,8 @@ async def run_recipe(
             return []
 
         collections = json_collection_kinds(page, entries) if recipe.kind == "json_api" else {}
+        if checkpoint and (page_number == 1 or page_number % 5 == 0):
+            checkpoint(f"{'Scanning listing' if verify_all_pages else 'Reading notices'}: page {page_number}, {observed_count} entries")
         deadline_columns = {}
         for entry in entries:
             sampling_done = max_tenders is not None and sampled >= max_tenders
@@ -261,6 +283,34 @@ async def run_recipe(
             tender_url = current_url
             source_base = link_base
             detail_url = None
+            summary = {k: _field_value(select(entry)) for k, select in listing_fields.items()}
+            checkpoint_key = None
+            if resume and isinstance(entry, html.HtmlElement):
+                checkpoint_key = hashlib.sha256(recipe_digest + current_url.encode() +
+                                                html.tostring(entry, with_tail=False)).hexdigest()
+                if cached := fetch.staged_notice(checkpoint_key):
+                    tenders.append(cached)
+                    if identifier := _single_text(cached.fields.get("id")):
+                        identities.add(identifier)
+                    else:
+                        anonymous += 1
+                    checked += 1
+                    continue
+            if large_archive and max_tenders is None and summary:
+                row_url = (_navigation_url(link_base, detail(entry), origin, "detail.link", source=entry)
+                           if recipe.detail.link else _title_link(entry, summary.get("title"), link_base, origin, []))
+                raw_summary = RawTender(url=row_url or current_url, fields=summary, archived_summary=True)
+                # An observed permalink lets the scan count a closed row even if its actual ID
+                # is only on the detail. Do not invent a published identifier for that row.
+                listed_tender = normalize(raw_summary.model_copy(update={"fields": {**summary, "id": summary.get("id") or row_url}}), recipe.locale)
+                if row_url and listed_tender and listed_tender.status in {"withdrawn", "closed"}:
+                    if summary.get("id") and summary.get("title"):
+                        identities.add(listed_tender.id)
+                        tenders.append(raw_summary)
+                    else:
+                        unresolved_links.add(row_url)
+                    checked += 1
+                    continue
             if recipe.detail.link is not None:
                 link = _navigation_url(
                     link_base, detail(entry), origin, "detail.link", source=entry
@@ -288,7 +338,7 @@ async def run_recipe(
                 detail_url = tender_url
                 source = _parse_page(detail_response, recipe.kind)
                 source_base = document_base(source, tender_url)
-                if isinstance(source, html.HtmlElement) and (target := full_notice_url(source, source_base, origin)):
+                if not recipe.documents.page and isinstance(source, html.HtmlElement) and (target := full_notice_url(source, source_base, origin)):
                     _check_block(detail_response)
                     detail_response = await fetch_page(fetch, target, origin)
                     source = _parse_page(detail_response, "html")
@@ -308,6 +358,20 @@ async def run_recipe(
                     suffix = title.partition(":")[2].strip()
                     if any(" ".join(a.text_content().split()) == suffix for a in entry.xpath(".//a[@href]")):
                         values["title"] = suffix
+            for key, value in summary.items():
+                if not values.get(key):
+                    values[key] = value
+            if summary and detail_url and max_tenders is not None:
+                primary = normalize(RawTender(url=detail_url, fields=values), recipe.locale)
+                listed = normalize(RawTender(url=detail_url, fields={**summary, "id":summary.get("id") or detail_url}), recipe.locale)
+                if primary and listed and (summary.get("id") and primary.id != listed.id or
+                        (listed.submissionDeadline and primary.submissionDeadline and
+                         listed.submissionDeadline != primary.submissionDeadline) or
+                        listed.status in {"closed", "withdrawn"} and listed.status != primary.status):
+                    raise ListingFieldMismatch(f"list.fields disagrees with the notice at {detail_url}: "
+                                               f"ID {listed.id!r}/{primary.id!r}, "
+                                               f"deadline {listed.submissionDeadline}/{primary.submissionDeadline}, "
+                                               f"status {listed.status}/{primary.status}")
             if isinstance(entry, html.HtmlElement) and entry.tag == "tr" and not values.get("submissionDeadline"):
                 table = next(entry.iterancestors("table"), None)
                 if table not in deadline_columns:
@@ -320,19 +384,40 @@ async def run_recipe(
                 identities.add(identifier)
             else:
                 anonymous += 1
+            file_source, file_base = source, source_base
+            if recipe.documents.page:
+                if not detail_url or not isinstance(source, html.HtmlElement):
+                    raise RecipeReadError("documents.page requires an individual HTML notice")
+                index_url = _navigation_url(source_base, index_link(source), origin, "documents.page", source=source)
+                if not index_url or index_url in {current_url, detail_url}:
+                    raise RecipeReadError("documents.page did not identify a separate attachment index on the notice")
+                index_response = await fetch_page(fetch, index_url, origin)
+                _check_block(index_response)
+                final_index = str(index_response.url)
+                if attachment_owners.setdefault(final_index, detail_url) != detail_url:
+                    raise RecipeReadError("documents.page sends different notices to the same attachment index")
+                file_source = _parse_page(index_response, "html")
+                file_base = document_base(file_source, final_index)
+            if isinstance(file_source, html.HtmlElement) and (detail_url or recipe.documents.tab):
+                file_source = _document_panel(file_source, recipe.documents.tab)
             document_urls = list(dict.fromkeys(
                 url
-                for value in _strings(documents(source), links=True)
-                if (url := _resolve_http_url(source_base, value)) is not None
-                and _observed_href(source, source_base, url)
+                for value in _strings(documents(file_source), links=True)
+                if (url := _resolve_http_url(file_base, value)) is not None
+                and _observed_href(file_source, file_base, url, document_only=True)
             ))
+            if recipe.documents.page:
+                document_urls.extend(u for u in _attachment_links(file_source, file_base) if portal_origin(u) == origin)
+                if not document_urls:
+                    raise RecipeReadError("documents.link found no files on the notice's attachment index")
             if recipe.kind == "html" and recipe.detail.link is not None:
                 _check_block(
                     detail_response, content_available=bool(values.get("id") or document_urls)
                 )
             observed_file = any(_FILE_SUFFIX.search(urlsplit(url).path) for url in document_urls)
             if isinstance(source, html.HtmlElement):
-                attachments = _attachment_links(source, source_base)
+                # A notice with a separate dossier may also link supplier questions.
+                attachments = [] if recipe.documents.page else _attachment_links(file_source, source_base)
                 observed_file = bool(attachments)
                 if search_pages:
                     # A search row's other links often lead to profiles and navigation.
@@ -341,11 +426,11 @@ async def run_recipe(
                 if source is not entry and _EZAK_NOTICE.fullmatch(urlsplit(tender_url).path):
                     document_urls = _prefer_ezak_file_links(document_urls, public_files)
                 document_urls.extend(public_files)
-            if source is not entry and isinstance(entry, html.HtmlElement):
+            if source is not entry and isinstance(entry, html.HtmlElement) and not (recipe.documents.page or recipe.documents.tab):
                 row_attachments = _attachment_links(entry, link_base)
                 observed_file = observed_file or bool(row_attachments)
                 document_urls.extend(url for url in row_attachments if portal_origin(url) == origin)
-            if isinstance(values.get("url"), str):
+            if isinstance(values.get("url"), str) and not recipe.documents.page:
                 # Public feeds may link to a separate notice website. This value is
                 # delivered as metadata only, after all fetch destinations are chosen.
                 if recipe.kind == "json_api":
@@ -428,6 +513,8 @@ async def run_recipe(
                                      source_language=(source.getroottree().getroot().get("lang")
                                                       if isinstance(source, html.HtmlElement) else None),
                                      document_links=document_urls))
+            if checkpoint_key:
+                fetch.stage_notice(checkpoint_key, tenders[-1])
         if following is None or (not verify_all_pages and max_tenders == sampled):
             break
         page_url = following
@@ -452,7 +539,49 @@ async def run_recipe(
         # Tolerate one removed notice, or up to 20% on larger listings.
         if not tenders or (skipped >= 2 and skipped * 5 > sampled):
             raise RecipeReadError(message)
+    if verify_all_pages and isinstance(fetch, RunPageCache):
+        fetch.scanned_pages[recipe.list_.url] = page_number
+    if recipe.detail.rendered:
+        if recipe.kind != "json_api" or recipe.detail.link or not recipe.fields.get("url"):
+            raise RecipeReadError("a rendered detail needs an individual notice URL from a JSON listing")
+        selectors = {key: _selector("html", expr, "rendered detail " + key)
+                     for key, expr in recipe.detail.rendered_fields.items()}
+        for pos, raw in enumerate(tenders):
+            if portal_origin(raw.url) != origin or raw.url == recipe.list_.url:
+                raise RecipeReadError("the JSON record has no public notice URL on its portal")
+            if checkpoint and pos % 5 == 0:
+                checkpoint(f"Checking rendered notices: {pos + 1} of {len(tenders)}")
+            source, files = await rendered_file_source(raw.url, fetch)
+            for key, select in selectors.items():
+                if value := _field_value(select(source)):
+                    raw.fields[key] = value
+            raw.document_links = list(dict.fromkeys([*raw.document_links, *files]))
+            raw.document_names = files
+            raw.detail_url = raw.url
     return tenders
+
+
+async def rendered_file_source(url, fetch):
+    from brain.js_discover import _capture_json
+    # Reuse the three validated notices within this read. Rotating browser sessions on
+    # later reads must observe current public URLs afresh.
+    cache = getattr(fetch, "rendered_samples", None)
+    if cache is None:
+        cache = fetch.rendered_samples = {}
+    if url in cache:
+        return cache[url]
+    notice = {}
+    await _capture_json(url, fetch, notice=notice)
+    if not notice.get("markup"):
+        raise RecipeReadError("Chromium could not render the public tender notice")
+    source = html.fromstring(notice["markup"])
+    files = dict(notice["files"])
+    for link in _attachment_links(source, document_base(source, url)):
+        if portal_origin(link) == portal_origin(url):
+            files.setdefault(link, "")
+    if len(cache) < 3:
+        cache[url] = (source, files)
+    return source, files
 
 
 def full_notice_url(source: html.HtmlElement, base_url: str, origin: Origin) -> str | None:
@@ -487,12 +616,31 @@ def _document_controls(source: html.HtmlElement) -> Iterator[html.HtmlElement]:
             yield node
 
 
+def _document_panel(source: html.HtmlElement, label: str | None) -> html.HtmlElement:
+    tabs = source.xpath("descendant-or-self::*[@role='tab'][@aria-controls or starts-with(@href,'#')]")
+    panels = {}
+    for tab in tabs:
+        name = " ".join(tab.text_content().split())
+        target = tab.get("aria-controls") or tab.get("href", "")[1:]
+        if name and target:
+            panels[name] = target
+    if not label and len(set(panels.values())) < 2:
+        return source
+    if not label or label not in panels:
+        raise RecipeReadError("documents.tab must identify the notice's primary dossier among its tabs: "
+                              + ", ".join(panels)[:300])
+    nodes = source.xpath("descendant-or-self::*[@id=$target]", target=panels[label])
+    if len(nodes) != 1:
+        raise RecipeReadError(f"documents.tab {label!r} has no public dossier panel in the notice HTML")
+    return nodes[0]
+
+
 def _attachment_links(source: html.HtmlElement, base_url: str) -> list[str]:
     """Recover file links with positive evidence on the selected row or notice."""
     links = []
     for anchor in source.xpath(
         "descendant-or-self::a[@href]"
-        "[not(ancestor::nav or ancestor::footer or ancestor::aside or ancestor::*[@role='navigation'])]"
+        "[not(ancestor::nav or ancestor::footer or ancestor::aside or ancestor::header[not(ancestor::article or ancestor::main)] or ancestor::*[@role='navigation'])]"
     ):
         url = _resolve_http_url(base_url, anchor.get("href", ""))
         if not url:
@@ -952,12 +1100,15 @@ def _next_query_page(url: str, page_size: int) -> str | None:
     return parts._replace(query="&".join(pairs)).geturl()
 
 
-def _observed_href(source: Any, base_url: str, url: str) -> bool:
+def _observed_href(source: Any, base_url: str, url: str, *, document_only: bool = False) -> bool:
     if not isinstance(source, html.HtmlElement):
         return True  # JSONPath selects values from the response itself.
+    selector = ("descendant-or-self::a[not(ancestor::nav or ancestor::footer or ancestor::aside "
+                "or ancestor::header[not(ancestor::article or ancestor::main)])]/@href"
+                if document_only else "descendant-or-self::a/@href")
     return any(
         _resolve_http_url(base_url, href) == url
-        for href in source.xpath("descendant-or-self::a/@href")
+        for href in source.xpath(selector)
     )
 
 
@@ -1041,7 +1192,13 @@ def _flatten(matches: list[Any]) -> Iterator[Any]:
 def _strings(matches: list[Any], *, links: bool = False) -> Iterator[str]:
     for value in _flatten(matches):
         if isinstance(value, html.HtmlElement):
-            value = value.get("href") if links else value.text_content()
+            value = value.get("href") if links else " ".join(value.xpath(
+                "descendant-or-self::*/text()[not(ancestor::style or ancestor::script or ancestor::template "
+                "or ancestor::noscript or ancestor::*[@hidden or @aria-hidden='true'])]"))
+        elif isinstance(value, etree._ElementUnicodeResult) and not links and not value.is_attribute and not value.is_tail:
+            parent = value.getparent()
+            if parent is not None and parent.xpath("ancestor-or-self::*[self::style or self::script or self::template or self::noscript or @hidden or @aria-hidden='true']"):
+                continue
         if not links and type(value) in (int, float):
             value = str(value)
         if isinstance(value, str) and (value := value.strip()):

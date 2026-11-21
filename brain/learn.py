@@ -13,25 +13,28 @@ from pydantic import ValidationError
 
 from app.db import now_iso
 from app.fetcher import RETRY_STATUSES, PortalFetcher
-from app.health import check_health
+from app.health import check_health, clean_short_fields
 from app.models import OPTIONAL_TENDER_FIELDS, ReadResult, Recipe, Tender
 from brain.blocks import Blocked, detect_block
 from brain.llm import BudgetExceeded, LLMUnavailable, ScopedLLM
-from brain.normalize import normalize, shows_deadline_time
-from brain.notice_fields import notice_facts
+from brain.normalize import _single_text, normalize, shows_deadline_time
+from brain.notice_fields import labelled_values, notice_facts
 from brain.run_recipe import (
     MAX_PAGES, MissedNextPage, NoPublicNextLink, NotANotice, Origin, PageLimitExceeded, PaginationError,
     RecipeReadError, advertised_next_urls,
     _advertised_total_count, _attachment_links, canonical_origin, empty_search_url, fetch_page, is_json_response,
-    _numbered_pager, full_notice_url, next_page_controls,
-    document_base, navigation_view, portal_origin, resolve_portal_url, run_recipe,
+    _numbered_pager, full_notice_url, next_page_controls, ListingFieldMismatch,
+    document_base, navigation_view, portal_origin, resolve_portal_url, run_recipe, rendered_file_source,
 )
 from brain.public_search import api_subdomain
-from brain.scope import heading_scope, navigation_preserves_scope
+from brain.scope import archive_open_view, heading_scope, navigation_preserves_scope
 from brain.shrink import shrink
 
 _SAMPLE_SIZE = 3
 _MAX_LINKS = 60
+_NOTICE_ROWS = ("//tr[@data-oid or @data-id or td//a[@href]] | //article[.//a[@href]] | "
+                "//*[self::li or self::div][.//a[@href] and (h2 or h3 or h4 or @data-id) "
+                "and (preceding-sibling::* or following-sibling::*)]")
 _ALL_LISTINGS_LABELS = {"view all tenders", "view all notices", "view all opportunities"}
 _LABELLED_NEXT = (
     "//*[self::a or self::link][@href and (@rel='next' or "
@@ -125,6 +128,7 @@ class PageSample:
     document: html.HtmlElement | None = None
     requested_url: str | None = None
     navigation_label: str = ""
+    attachment_sample: "PageSample | None" = None
 
     def scope_label(self) -> str | None:
         if self.document is not None:
@@ -142,7 +146,10 @@ class PageSample:
         links = {url: label[:160] for url, label in self.links.items()}
         evidence = {"url": self.url, "html": self.markup, "links": links}
         if self.document is not None:
-            rows = self.document.xpath("//tr[@data-oid or @data-id or td//a[@href]] | //article[.//a[@href]]")
+            tabs = self.document.xpath("//*[@role='tab'][@aria-controls or starts-with(@href,'#')]")
+            if tabs:
+                evidence["document_tabs"] = list(dict.fromkeys(" ".join(t.text_content().split())[:140] for t in tabs))[:20]
+            rows = self.document.xpath(_NOTICE_ROWS)
             if rows:
                 evidence["sample_row"] = shrink(html.tostring(rows[0], encoding="unicode"), max_chars=2200)
             evidence["pagination"] = [
@@ -288,9 +295,17 @@ async def validate_candidate(
     blank = [row for row in rows if not row.fields.get("id") and not row.fields.get("title")]
     if blank and len(blank) * 2 < len(rows):
         rows = [row for row in rows if row not in blank]
+    invalid_fields = clean_short_fields(rows)
+    if (require_complete and len(rows) >= _SAMPLE_SIZE and recipe.detail.link and "buyerName" in recipe.fields
+            and not any(_single_text(row.fields.get("buyerName")) for row in rows)):
+        raise RecipeValidationError("fields.buyerName returned no visible buyer on three individual notices; "
+                                    "inspect the buyer label on the actual notice or omit it if absent")
     tenders = [tender for row in rows if (tender := normalize(row, recipe.locale)) is not None]
     if len(tenders) != len(rows) or any(not tender.title for tender in tenders):
-        raise InvalidListingSample("sample tenders need a portal-issued ID and a title")
+        missing = next((row for row in rows if not _single_text(row.fields.get("id")) or
+                        not _single_text(row.fields.get("title"))), rows[0])
+        key = "id" if not _single_text(missing.fields.get("id")) else "title"
+        raise InvalidListingSample(f"sample tenders need a portal-issued ID and a title: fields.{key} failed at {missing.url}")
     if len({tender.id for tender in tenders}) != len(tenders):
         raise RecipeValidationError("sample tender IDs are not distinct")
     if stored_ids:
@@ -307,7 +322,7 @@ async def validate_candidate(
                     f"the sampled tender {tender.title!r} must keep its stored ID {expected!r}, "
                     f"but fields.id returned {tender.id!r}"
                 )
-    health = check_health(None, ReadResult(tenders=tenders, raw_count=len(rows),
+    health = check_health(None, ReadResult(tenders=tenders, raw_count=len(rows), invalid_fields=invalid_fields,
                                            deadline_times_seen=sum(shows_deadline_time(row) for row in rows)))
     if not health.ok:
         raise RecipeValidationError("; ".join(health.problems))
@@ -319,6 +334,9 @@ async def validate_candidate(
         if affected and not any(row.document_links for row in affected):
             raise RecipeValidationError("sampled tenders still have no document links")
     if require_complete:
+        if len(tenders) >= 2 and len({t.url for t in tenders}) == len(tenders) and all(row.document_links for row in rows):
+            if len({frozenset(row.document_links) for row in rows}) == 1:
+                raise RecipeValidationError("documents.link returned identical files on every sampled notice; verify notice-specific attachments")
         shared_url = len(tenders) > 1 and len({tender.url for tender in tenders}) == 1
         no_documents = not any(row.document_links for row in rows)
         if shared_url or no_documents:
@@ -396,6 +414,20 @@ async def propose_html_recipe(
     detail_stored_id: str | None = None,
     require_complete: bool = False,
 ) -> Recipe:
+    file_page = detail.attachment_sample if detail else None
+    if file_page is None and detail is not None and detail.document is not None and not _files_visible(detail):
+        # Inspect a unique inline link without relying on translated labels.
+        anchors = detail.document.xpath("//main//a[@href] | //*[@role='main']//a[@href] | //article//a[@href]")
+        targets = {url for a in anchors if not a.xpath("ancestor::nav | ancestor::header | ancestor::footer | ancestor::aside")
+                   if (url := _observed_url(a.get("href"), detail, portal_origin(detail.url))) and url != detail.url}
+        if len(targets) == 1:
+            try:
+                sample = await read_page_sample(targets.pop(), fetch, portal_origin(detail.url))
+                if _files_visible(sample):
+                    file_page = sample
+            except (RecipeReadError, httpx.HTTPError):
+                pass
+    facts = labelled_values(detail.document) if detail is not None and detail.document is not None else []
     prompt = {
         "task": (
             "Write an HTML Recipe based on these pages. Keep list.url equal to the supplied "
@@ -412,6 +444,9 @@ async def propose_html_recipe(
             "Use fields.id for the exact portal-issued ID, including a row's data-oid when present. "
             "If the portal only provides a stable "
             "individual notice permalink, its href can serve as the ID. "
+            "detail_facts contains observed source-language label/value pairs. Return fact_fields as a "
+            "map of tender field names to their zero-based fact indices. Prefer the official system or notice "
+            "identifier and named contracting authority from these facts over a URL or database row key. "
             "Map title, buyerName, publicationDate, "
             "submissionDeadline and status to their source values. For status, prefer the value that names the "
             "notice's state or type (open, awarded, cancelled) over a publishing flag. Use fields.url for the "
@@ -421,6 +456,19 @@ async def propose_html_recipe(
             "using flat keys placeOfPerformance.postalCode, placeOfPerformance.city and "
             "placeOfPerformance.countryCode. Use strings for all values in fields, and omit "
             "keys for data the portal does not show. Use documents.link for direct document URLs. "
+            "When files live on a separate public attachment index, set documents.page to the XPath of "
+            "that index href ON THE NOTICE and documents.link to the observed files ON THE INDEX. "
+            "The notice remains the tender URL. Avoid site menus, Q&A listings and links shared by all notices. "
+            "If the notice has tabs, set documents.tab to the exact visible label of the primary tender dossier tab. "
+            "A Q&A tab or a supplier message must never substitute for that dossier. "
+            "When documents.page is used, documents.tab refers to tabs on that separate index, if any. "
+            "Use local-language labels and repeated markup, including div and li cards, for the portal's "
+            "published identifier (its reference is a valid ID), title and labelled facts. "
+            "Set locale.deadline_format to an exact numeric Python strptime pattern matching the source, "
+            "including connecting words and characters. Map source status, nature and procedure labels to "
+            "the allowed canonical values in locale.status_labels, nature_labels and procedure_labels. "
+            "For long archives, also map list.fields.id, title, status, submissionDeadline to relative "
+            "selectors on the listing row when those values are visible. Never use publication as a deadline. "
             "Leave documents.steps empty. "
             "Always include locale.tz: "
             "use the IANA time zone for local deadlines, based on the stated zone or an "
@@ -432,6 +480,8 @@ async def propose_html_recipe(
         "recipe_schema": Recipe.model_json_schema(),
         "list_page": listing.evidence(),
         "detail_page": detail.evidence() if detail else None,
+        "detail_facts": [{k: fact[k] for k in ("label", "value")} for fact in facts],
+        "attachment_index": file_page.evidence() if file_page else None,
         "failing_list_page": pagination_page,
         "previous_recipe": previous.model_dump(by_alias=True) if previous else None,
         "feedback": feedback or [],
@@ -444,17 +494,63 @@ async def propose_html_recipe(
                 "Use the current list page to select current tenders."
             )
     proposal = await llm.json(json.dumps(prompt, ensure_ascii=False), system=_SYSTEM, strong=strong)
+    if (isinstance(proposal, dict) and isinstance(proposal.get("fact_fields"), dict)
+            and isinstance(proposal.get("detail"), dict) and proposal["detail"].get("link")
+            and isinstance(proposal.get("fields", {}), dict)):
+        fields = dict(proposal.get("fields", {}))
+        fields.update({k: facts[i]["xpath"] for k, i in proposal["fact_fields"].items()
+                       if k in Tender.model_fields and k not in {"documents", "url", "placeOfPerformance"}
+                       and type(i) is int and 0 <= i < len(facts)})
+        proposal = {**proposal, "fields": fields}
     if isinstance(proposal, dict) and isinstance(proposal.get("fields"), dict):
         # An omitted field has no selector. Some models spell that omission as JSON null.
-        proposal = {**proposal, "fields": {k: v for k, v in proposal["fields"].items() if v is not None}}
+        proposal = {**proposal, "fields": {
+            k: v.removesuffix("/normalize-space(text())") if isinstance(v, str) else v
+            for k, v in proposal["fields"].items() if v is not None}}
     try:
         candidate = Recipe.model_validate(proposal)
     except ValidationError as exc:
+        if hasattr(llm, "record_rejection"):
+            llm.record_rejection(proposal, str(exc.errors(include_input=False)[0]["loc"]))
         raise RecipeValidationError("the proposal does not match the recipe schema") from exc
     if candidate.kind != "html" or candidate.list_.url != listing.url:
         raise RecipeValidationError("the recipe must use the supplied HTML list URL")
     if candidate.list_.search:
         raise RecipeValidationError("a public search must be captured from the listing")
+    id_selector = candidate.fields.get("id") or candidate.list_.fields.get("id", "")
+    if candidate.detail.link and "@href" in id_selector and any(
+            re.fullmatch(r"(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d./_-]{6,45}", item["value"]) for item in facts):
+        message = "fields.id chose a link while the notice publishes labelled identifiers; map its official ID from detail_facts"
+        if hasattr(llm, "record_rejection"):
+            llm.record_rejection(proposal, message)
+        raise RecipeValidationError(message)
+    if detail and detail.document is not None and candidate.documents.page and file_page is None:
+        # On a notice with several links the proposal selects the dossier. Keep its real
+        # markup available for the next attempt if the first file selector doesn't work.
+        try:
+            links = detail.document.xpath(candidate.documents.page)
+            links = links if isinstance(links, list) else [links]
+            observed = {_observed_url(link.get("href") if isinstance(link, html.HtmlElement) else link,
+                                      detail, portal_origin(detail.url)) for link in links[:20]}
+            observed.discard(None)
+            if len(observed) == 1 and detail.url not in observed:
+                detail.attachment_sample = await read_page_sample(observed.pop(), fetch, portal_origin(detail.url))
+        except (etree.XPathError, RecipeReadError, httpx.HTTPError):
+            pass  # sample validation records the failing step if the proposed route cannot run
+    # A language tag by itself does not identify the civil timezone. For a newly learned
+    # date template, corroborate its timezone with an explicit zone, region tag, ccTLD
+    # or country in the notice (for example a postal address ending in ', FR').
+    if candidate.locale.deadline_format and candidate.locale.tz:
+        region = (candidate.locale.country or "").upper()
+        evidence = listing.markup + (detail.markup if detail else "")
+        metadata = " ".join(s.document.get("lang", "") for s in (listing, detail) if s and s.document is not None)
+        jurisdiction = (bool(re.fullmatch(r"[A-Z]{2}", region)) and
+                        ((urlsplit(listing.url).hostname or "").lower().endswith("." + region.lower())
+                         or re.search(r"[-_]" + re.escape(region) + r"\b", metadata, re.I)
+                         or re.search(r"(?:,\s*|>\s*)" + re.escape(region) + r"\s*(?:<|$)", evidence)))
+        city = candidate.locale.tz.rsplit("/", 1)[-1].replace("_", " ")
+        if not jurisdiction and not re.search(r"\b" + re.escape(city) + r"\b", evidence, re.I):
+            candidate.locale.tz = candidate.locale.country = None
     candidate.list_.scope_label = listing.scope_label()
     if previous and previous.list_.url == listing.url and not candidate.list_.scope_label:
         candidate.list_.scope_label = previous.list_.scope_label
@@ -475,6 +571,13 @@ async def propose_html_recipe(
     try:
         try:
             await validate_candidate(candidate, fetch, **checks)
+        except ListingFieldMismatch as exc:
+            if hasattr(llm, "record_rejection"):
+                llm.record_rejection(proposal, str(exc))
+            # The official notice can still deliver every field. Check the full detail route
+            # independently before saving it, without the rejected archive shortcut.
+            candidate.list_.fields = {}
+            await validate_candidate(candidate, fetch, **checks)
         except MissedNextPage:
             # Prefer the model's selector when it works. A labelled link can recover a
             # missed pager even when repeated rows pushed it outside the model's excerpt.
@@ -483,9 +586,15 @@ async def propose_html_recipe(
             candidate.list_.next_page = _LABELLED_NEXT
             await validate_candidate(candidate, fetch, **checks)
     except IncompleteRecipe as exc:
+        if hasattr(llm, "record_rejection"):
+            llm.record_rejection(proposal, str(exc))
         candidate.learned_by = getattr(llm, "strong_model_name", llm.model_name) if strong else llm.model_name
         candidate.learned_at = now_iso()
         exc.recipe = candidate  # it works; attach keeps it if no later attempt finds the documents
+        raise
+    except (RecipeReadError, RecipeValidationError) as exc:
+        if hasattr(llm, "record_rejection"):
+            llm.record_rejection(proposal, str(exc))
         raise
     candidate.learned_by = llm.strong_model_name if strong else llm.model_name
     candidate.learned_at = now_iso()
@@ -519,7 +628,36 @@ async def _learn_public_feed(listing: PageSample, fetch: PortalFetcher, llm: Sco
     if feed != page and not api_subdomain(page, feed):
         raise RecipeValidationError("discovered JSON URL belongs to another portal")
     candidate.list_.scope_label = listing.scope_label()
-    await validate_candidate(candidate, fetch)
+    if candidate.kind == "json_api" and candidate.fields.get("url") and not candidate.detail.link:
+        sample = await run_recipe(candidate, fetch, max_tenders=1)
+        if sample and not sample[0].document_links and portal_origin(sample[0].url) == page and sample[0].url != candidate.list_.url:
+            notice = await read_page_sample(sample[0].url, fetch, page)
+            if _script_shell(notice):
+                rendered, files = await rendered_file_source(sample[0].url, fetch)
+                if not files:
+                    raise RecipeValidationError("the public feed has notices, but its rendered notice exposed no public dossier files")
+                facts = labelled_values(rendered)
+                mapped = await llm.json(json.dumps({
+                    "task": "Map any additional official ID, buyer, publication date, deadline and status shown on this "
+                            "individual notice. Return fields as a dictionary of XPath 1.0 selectors and fact_fields "
+                            "as a dictionary of tender field names to zero-based indices of the labelled facts. "
+                            "Keep existing trustworthy listing values. Omit values absent from the notice.",
+                    "listing_fields": sample[0].fields,
+                    "rendered_notice": shrink(html.tostring(rendered, encoding="unicode"), max_chars=13500),
+                    "detail_facts": [{k: f[k] for k in ("label", "value")} for f in facts],
+                }, ensure_ascii=False), system=_SYSTEM)
+                allowed = {"id", "title", "buyerName", "publicationDate", "submissionDeadline", "status", "referenceNumber"}
+                if isinstance(mapped, dict):
+                    paths = mapped.get("fields")
+                    for key, value in (paths.items() if isinstance(paths, dict) else ()):
+                        if key in allowed and isinstance(value, str):
+                            candidate.detail.rendered_fields[key] = value
+                    indices = mapped.get("fact_fields")
+                    for key, i in (indices.items() if isinstance(indices, dict) else ()):
+                        if key in allowed and type(i) is int and 0 <= i < len(facts):
+                            candidate.detail.rendered_fields[key] = facts[i]["xpath"]
+                candidate.detail.rendered = True
+    await validate_candidate(candidate, fetch, require_complete=candidate.detail.rendered)
     return candidate
 
 
@@ -561,6 +699,9 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                     "Choose list_url from entry.links or the current URL, or use empty_search_url "
                     "when the public search form has no results yet. An overview showing a few of "
                     "many results is a preview: follow its link to the complete results. "
+                    "Prefer an observed complete open-tenders view over a mixed historical archive, "
+                    "return complete_open_listing=true only for such a link. A single phase (offers, "
+                    "qualification or expressions of interest) cannot represent all open opportunities. "
                     "Keep the requested scope. Never choose a buyer, category, keyword, date range "
                     "or narrower results window to make the listing easier to read. "
                     "If the link leads to another navigation page, return intermediate=true and "
@@ -584,7 +725,9 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
             if listing.document is not None and len(listing.document.xpath("//tr[td[3] and td//a[@href]]")) >= 2:
                 # A paged results table is already a listing, even if its menu
                 # also advertises an advanced-search or category directory.
-                if next_page_controls(listing.navigation, listing.url) or _numbered_pager(listing.navigation, listing.url):
+                open_target = target in listing.links and (
+                    heading_scope(listing.links[target]) == "Current open opportunities" or discovery.get("complete_open_listing") is True)
+                if not open_target and (next_page_controls(listing.navigation, listing.url) or _numbered_pager(listing.navigation, listing.url)):
                     target = listing.url
             if target is None:
                 if step == 0:
@@ -627,6 +770,12 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                 break
         if listing is not entry and _script_shell(listing):
             return await _learn_public_feed(listing, fetch, llm, shell_reason)
+        if active_url := archive_open_view(listing.document, listing.url):
+            active = await read_page_sample(active_url, fetch, origin)
+            if (active.document is not None and active.document.xpath(_NOTICE_ROWS)
+                    and urlsplit(active.url).query == urlsplit(active_url).query):
+                active.navigation_label = "Current open opportunities"
+                listing = active
         try:
             next_links = advertised_next_urls(listing.navigation, listing.url)
         except NoPublicNextLink as exc:
@@ -641,7 +790,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
             if listing.document is not None:
                 base = document_base(listing.document, listing.url)
                 for row in listing.document.xpath(
-                    "//tr[td[2] and td//a[@href]] | //article[.//header//a[@href]]"
+                    _NOTICE_ROWS +
                     " | //tr[.//a[contains(@href, 'contract_display_')]]"
                 )[:_SAMPLE_SIZE]:
                     targets = {_observed_url(href, listing, origin) for href in row.xpath(".//a/@href")}
