@@ -10,24 +10,42 @@ Built by team TokenBurners for the Patterno track of the MAIN AI Hackathon, Maas
 
 You need Docker and the OpenAI key we sent you privately.
 
-```sh
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-notepad .env
-Paste the provided API key inside the .env file after OPENAI_API_KEY=
-and then save it.
+1. Create `.env` from the example (skipped if you already have one) and open it.
 
-docker build -t watchtower .                      # linux/amd64; Chromium is already in the base image
-docker run -d --name watchtower -p 127.0.0.1:8080:8080 --env-file .env -v watchtower-data:/data watchtower
+   macOS or Linux:
 
-```
+   ```sh
+   [ -f .env ] || cp .env.example .env
+   nano .env
+   ```
+
+   Windows PowerShell:
+
+   ```powershell
+   if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+   notepad .env
+   ```
+
+2. Paste the key after `OPENAI_API_KEY=` and save. Keep this file private and never commit it.
+   `LLM_BUDGET_USD=3` in the same file stops all model calls once $3 has been spent.
+
+3. Build and start. These two commands are the same in every shell:
+
+   ```sh
+   docker build -t watchtower .
+   docker run -d --name watchtower -p 127.0.0.1:8080:8080 --env-file .env -v watchtower-data:/data watchtower
+   ```
+
+   The image is linux/amd64 and already contains Chromium.
 
 Open <http://localhost:8080> for the dashboard and <http://localhost:8080/docs> for the interactive API reference.
 The volume keeps the database, the downloaded documents and the model spend ledger across restarts.
+`docker logs -f watchtower` shows what it is doing; `docker rm -f watchtower` stops it.
 
 To check that the container sees the key (it prints only whether one is set):
 
 ```sh
-docker exec watchtower python -c 'import os; print("key set" if os.getenv("OPENAI_API_KEY","").strip() else "key MISSING")'
+docker exec watchtower python -c "import os; print('key set' if os.getenv('OPENAI_API_KEY','').strip() else 'key MISSING')"
 ```
 
 ## The API
@@ -91,7 +109,8 @@ captcha solving.
 | Regular read | none | $0 |
 
 Including failed attempts, a live session on four real portals spent $0.14, or $0.035 per portal.
-`LLM_BUDGET_USD` (default `5`) stops all model calls once that much has been spent. Sources:
+`LLM_BUDGET_USD` stops all model calls once that much has been spent: `3` in `.env.example`, `5` if it is not
+set. Sources:
 [test set results](testset/results.md), [simulated judging reports](judge/).
 
 ## Environment variables
