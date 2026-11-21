@@ -321,15 +321,17 @@ class Worker:
             "SELECT source_key FROM document_sources WHERE portal_id = ? ORDER BY last_verified_at LIMIT ?",
             (portal_id, DOC_REVALIDATIONS_PER_READ),
         )}
-        for raw in raws:
-            tender = normalize(raw, recipe.locale)
+        normalized_rows = [(raw, normalize(raw, recipe.locale)) for raw in raws]
+        states_seen = [t.status for _, t in normalized_rows if t is not None]
+        archive_dominated = len(states_seen) >= 4 and states_seen.count("closed") > states_seen.count("open")
+        for raw, tender in normalized_rows:
             if tender is None:
                 continue
             if raw.detail_url:
                 detail_urls[tender.id] = raw.detail_url
             if status := _single_text(raw.fields.get("status")):
                 source_statuses[tender.id] = status
-            if raw.document_links:
+            if raw.document_links and (tender.status == "open" or not archive_dominated):
                 tender_ids_with_document_links.add(tender.id)
                 links = list(dict.fromkeys(raw.document_links))
                 stored = await store_documents(self.db, portal_id, tender, links, fetch, revalidate=revalidate)
@@ -344,7 +346,8 @@ class Worker:
             # Every document sits behind a login or captcha: the portal can't be delivered.
             raise Blocked(block_kind or "login", "the tender documents can't be downloaded without it")
         return ReadResult(
-            tenders=tenders, raw_count=len(raws), documents_tried=tried, documents_failed=failed,
+            tenders=tenders, raw_count=len(raws), verified_empty=getattr(raws, "verified_empty", False),
+            documents_tried=tried, documents_failed=failed,
             deadline_times_seen=sum(shows_deadline_time(raw) for raw in raws),
             documents_kept=failed_revalidations,
             tender_ids_with_document_links=tender_ids_with_document_links,

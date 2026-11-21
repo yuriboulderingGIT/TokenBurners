@@ -1,0 +1,26 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.14, pytest-9.2.0, pluggy-1.7.0 -- C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\python.exe
+rootdir: C:\Users\kalin\Documents\hackathon_project\TokenBurners
+configfile: pytest.ini
+plugins: anyio-4.16.0
+collecting ... collected 9 items
+
+tests/test_reading_diagnostics.py::test_complete_json_notice_feed_is_a_healthy_control PASSED [ 11%]
+tests/test_reading_diagnostics.py::test_stylesheet_text_in_buyer_cannot_verify_a_read XFAIL [ 22%]
+tests/test_reading_diagnostics.py::test_one_unidentified_notice_makes_coverage_unverified XFAIL [ 33%]
+tests/test_reading_diagnostics.py::test_json_listing_can_open_html_notice_details XFAIL [ 44%]
+tests/test_reading_diagnostics.py::test_authoritative_empty_feed_is_a_verified_empty_read XFAIL [ 55%]
+tests/test_reading_diagnostics.py::test_login_wall_on_known_documents_is_detected_on_next_read XFAIL [ 66%]
+tests/test_reading_diagnostics.py::test_document_login_on_initial_read_is_detected PASSED [ 77%]
+tests/test_reading_diagnostics.py::test_html_fragment_cannot_be_published_as_a_pdf XFAIL [ 88%]
+tests/test_reading_diagnostics.py::test_first_read_skips_files_for_explicitly_closed_archive XFAIL [100%]
+
+=========================== short test summary info ===========================
+XFAIL tests/test_reading_diagnostics.py::test_stylesheet_text_in_buyer_cannot_verify_a_read - a CSS-sized buyer value can pass a first-read health check
+XFAIL tests/test_reading_diagnostics.py::test_one_unidentified_notice_makes_coverage_unverified - one missing ID out of five is allowed by first-read health
+XFAIL tests/test_reading_diagnostics.py::test_json_listing_can_open_html_notice_details - the recipe forces JSON detail responses through the JSON parser
+XFAIL tests/test_reading_diagnostics.py::test_authoritative_empty_feed_is_a_verified_empty_read - an authoritative zero-result list is always considered unhealthy
+XFAIL tests/test_reading_diagnostics.py::test_login_wall_on_known_documents_is_detected_on_next_read - known files are not probed again until their revalidation window
+XFAIL tests/test_reading_diagnostics.py::test_html_fragment_cannot_be_published_as_a_pdf - a text/html fragment at a PDF URL is stored as a document
+XFAIL tests/test_reading_diagnostics.py::test_first_read_skips_files_for_explicitly_closed_archive - initial reads download files for already-closed archive notices
+======================== 2 passed, 7 xfailed in 0.90s =========================

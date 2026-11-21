@@ -87,8 +87,11 @@ async def store_documents(
             Path(row["path_on_disk"]).is_file() for row in known
         )
         validators = _revalidation_headers(source) if complete else {}
-        if complete and revalidate is not None and key[2] not in revalidate:
-            validators = None  # outside this read's revalidation budget: serve the verified revision
+        if complete and revalidate is not None:
+            if key[2] not in revalidate:
+                validators = None  # outside this read's revalidation budget: serve the verified revision
+            elif validators is None:
+                validators = {}  # selected representative: verify access even when the bytes are locally fresh
         if validators is None:
             result.documents.extend(_document(row) for row in known)
             continue
@@ -133,7 +136,7 @@ async def store_documents(
             log.info("document %s skipped: over %d bytes", url, MAX_DOC_BYTES)
             continue
 
-        page_block = _web_page(downloaded.path)
+        page_block = _web_page(downloaded.path, downloaded.content_type)
         if page_block is not None:
             downloaded.path.unlink(missing_ok=True)
             if page_block:
@@ -254,12 +257,13 @@ def _remove_stale(incoming: Path, max_age_seconds: float = 3600) -> None:
 # ---------- what did we download? ----------
 
 
-def _web_page(path: Path) -> str | None:
+def _web_page(path: Path, content_type: str | None = None) -> str | None:
     """None: not a web page. "": an ordinary web page. "login"/"captcha": a gate."""
     with open(path, "rb") as f:
         head = f.read(256 * 1024)
     start = head.lstrip(b"\xef\xbb\xbf \t\r\n").lower()
-    if not (start.startswith(b"<!doctype html") or start.startswith(b"<html") or b"<html" in start[:1024]):
+    html_type = bool(content_type and "text/html" in content_type.casefold())
+    if not html_type and not (start.startswith(b"<!doctype html") or start.startswith(b"<html") or b"<html" in start[:1024]):
         return None
     return detect_block(head.decode("utf-8", errors="replace"), 200) or ""
 

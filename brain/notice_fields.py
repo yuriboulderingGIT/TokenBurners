@@ -28,7 +28,7 @@ _LABELS = {
                         "evidenční číslo", "iktatószám"),
     "procedureType": ("procedure type", "verfahrensart", "type de procédure", "tipo de procedimiento",
                       "tipo di procedura", "proceduretype", "rodzaj procedury", "druh zadávacího řízení"),
-    "contractNature": ("contract nature", "art des auftrags", "nature du marché", "naturaleza del contrato",
+    "contractNature": ("contract nature", "art", "art des auftrags", "nature du marché", "naturaleza del contrato",
                        "natura dell'appalto", "aard van de opdracht", "rodzaj zamówienia", "druh zakázky",
                        "αντικείμενο σύμβασης"),
     "cpvCodes": ("cpv code", "cpv codes", "cpv", "code cpv", "código cpv", "codice cpv", "codul cpv", "kod cpv"),

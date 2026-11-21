@@ -1,0 +1,16 @@
+FFFF......                                                               [100%]
+================================== FAILURES ===================================
+E   KeyError: 'contractNature'
+C:\Users\kalin\Documents\hackathon_project\TokenBurners\tests\test_judge_regressions.py:98: KeyError: 'contractNature'
+E   KeyError: 'contractNature'
+C:\Users\kalin\Documents\hackathon_project\TokenBurners\tests\test_judge_regressions.py:98: KeyError: 'contractNature'
+E   KeyError: 'contractNature'
+C:\Users\kalin\Documents\hackathon_project\TokenBurners\tests\test_judge_regressions.py:98: KeyError: 'contractNature'
+E   KeyError: 'contractNature'
+C:\Users\kalin\Documents\hackathon_project\TokenBurners\tests\test_judge_regressions.py:98: KeyError: 'contractNature'
+=========================== short test summary info ===========================
+FAILED tests/test_judge_regressions.py::test_judge_portal_url_to_verified_file_bytes[hard]
+FAILED tests/test_judge_regressions.py::test_judge_portal_url_to_verified_file_bytes[easy]
+FAILED tests/test_judge_regressions.py::test_judge_portal_url_to_verified_file_bytes[invalid-proposal]
+FAILED tests/test_judge_regressions.py::test_judge_portal_url_to_verified_file_bytes[numbered-with-total]
+4 failed, 6 passed in 1.39s

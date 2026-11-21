@@ -173,6 +173,7 @@ class RawTender(BaseModel):
 class ReadResult(BaseModel):
     tenders: list[Tender]
     raw_count: int = 0  # how many list entries the recipe found
+    verified_empty: bool = False  # authoritative source explicitly reported zero results
     deadline_times_seen: int = 0
     documents_tried: int = 0
     documents_failed: int = 0

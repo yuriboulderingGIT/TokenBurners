@@ -65,6 +65,7 @@ class Downloaded:
     etag: str | None
     last_modified: str | None
     validator_target: str
+    content_type: str | None = None
 
 
 @dataclass
@@ -200,7 +201,7 @@ class Fetcher:
                     digest.update(chunk)
                     out.write(chunk)
             return Downloaded(path, size, digest.hexdigest(), _filename(response), etag, last_modified,
-                              _validator_target(response.request.url))
+                              _validator_target(response.request.url), response.headers.get("content-type"))
         finally:
             await response.aclose()
 

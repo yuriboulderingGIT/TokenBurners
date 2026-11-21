@@ -126,6 +126,12 @@ class PageLimitExceeded(PaginationError):
         return PageLimitExceeded(self.rows_read, self.advertised, pages)
 
 
+class ReadRows(list):
+    """Rows plus an explicit empty-result signal from an authoritative JSON count."""
+
+    verified_empty: bool = False
+
+
 async def run_recipe(
     recipe: Recipe, fetch: PortalFetcher, *, max_tenders: int | None = None,
     verify_all_pages: bool = False,
@@ -155,7 +161,7 @@ async def run_recipe(
     }
     documents = _selector(recipe.kind, recipe.documents.link, "documents.link")
 
-    tenders: list[RawTender] = []
+    tenders: list[RawTender] = ReadRows()
     seen_pages: set[str] = set()
     seen_rows: set[bytes] = set()
     identities: set[str] = set()
@@ -249,7 +255,11 @@ async def run_recipe(
                 f"only {observed_count} entries"
             )
         if not entries:
-            return []
+            tenders.verified_empty = (
+                recipe.kind == "json_api" and page_number == 1
+                and _advertised_total_count(page) == 0
+            )
+            return tenders
 
         collections = json_collection_kinds(page, entries) if recipe.kind == "json_api" else {}
         deadline_columns = {}
@@ -286,7 +296,8 @@ async def run_recipe(
                 fetched_links.add(link)
                 tender_url = str(detail_response.url)
                 detail_url = tender_url
-                source = _parse_page(detail_response, recipe.kind)
+                detail_is_html = _is_html_response(detail_response)
+                source = _parse_page(detail_response, "html" if detail_is_html else recipe.kind)
                 source_base = document_base(source, tender_url)
                 if isinstance(source, html.HtmlElement) and (target := full_notice_url(source, source_base, origin)):
                     _check_block(detail_response)
@@ -297,10 +308,13 @@ async def run_recipe(
             elif not sampling_done:
                 sampled += 1
 
-            values = {
-                name: _field_value(selector(source))
-                for name, selector in fields.items()
-            }
+            field_source = entry if recipe.kind == "json_api" and detail_url and detail_is_html else source
+            values = {}
+            for name, selector in fields.items():
+                try:
+                    values[name] = _field_value(selector(field_source))
+                except (ValueError, TypeError, KeyError):
+                    values[name] = None
             if detail_url and isinstance(source, html.HtmlElement):
                 fill_notice_fields(values, notice_facts(source))
                 title = _single_text(values.get("title"))
@@ -320,9 +334,12 @@ async def run_recipe(
                 identities.add(identifier)
             else:
                 anonymous += 1
+            document_selector = documents
+            if isinstance(source, html.HtmlElement) and recipe.kind == "json_api" and recipe.documents.link:
+                document_selector = _selector("html", recipe.documents.link, "documents.link")
             document_urls = list(dict.fromkeys(
                 url
-                for value in _strings(documents(source), links=True)
+                for value in _strings(document_selector(source), links=True)
                 if (url := _resolve_http_url(source_base, value)) is not None
                 and _observed_href(source, source_base, url)
             ))
@@ -631,6 +648,13 @@ def _parse_page(response: httpx.Response, kind: str) -> Any:
     except (ValueError, etree.ParserError) as exc:
         _check_block(response)
         raise RecipeReadError(f"could not parse portal response as {kind}") from exc
+
+
+def _is_html_response(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "").casefold()
+    if "text/html" in content_type or "application/xhtml+xml" in content_type:
+        return True
+    return response.content.lstrip(b"\xef\xbb\xbf \t\r\n").lower().startswith((b"<!doctype html", b"<html"))
 
 
 def _check_block(response: httpx.Response, *, content_available: bool = False) -> None:

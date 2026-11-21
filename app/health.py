@@ -20,6 +20,7 @@ Checks:
 """
 
 from collections import Counter
+import re
 from datetime import datetime, timezone
 
 from app.models import Health, ReadResult, Tender
@@ -47,6 +48,8 @@ def check_health(prev: ReadResult | None, new: ReadResult) -> Health:
     if not tenders:
         if new.raw_count:
             return _sick(f"the list showed {new.raw_count} entries, but none had a readable tender id")
+        if new.verified_empty:
+            return Health(ok=True)
         return _sick("no tenders found")
 
     problems: list[str] = []
@@ -82,7 +85,7 @@ def _sick(problem: str) -> Health:
 def _identity_problems(new: ReadResult) -> list[str]:
     tenders = new.tenders
     problems = []
-    if new.raw_count and len(tenders) < MIN_ID_RATE * new.raw_count:
+    if new.raw_count and len(tenders) < new.raw_count:
         problems.append(f"only {len(tenders)} of {new.raw_count} list entries had a readable tender id")
     # One id on two different notices: storage would silently drop one. A notice repeated
     # unchanged on overlapping pages is the same tender and stored once; its url may differ,
@@ -100,6 +103,13 @@ def _identity_problems(new: ReadResult) -> list[str]:
         titles = {t.title for t in tenders if t.title}
         if len(titles) == 1:
             problems.append("every tender has the same title, so the title is probably read from the wrong place")
+    for field in ("title", "buyerName", "referenceNumber"):
+        values = [getattr(t, field) for t in tenders if getattr(t, field)]
+        invalid = [value for value in values if len(value) > 500 or re.search(
+            r"[{}]|\.\w+__\w+|\bfunction\s*\(", value, re.I
+        )]
+        if invalid:
+            problems.append(f"{_FIELD_NAMES.get(field, field)} contains markup or is too long")
     return problems
 
 

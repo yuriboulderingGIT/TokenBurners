@@ -1,0 +1,28 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.14, pytest-9.2.0, pluggy-1.7.0 -- C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\python.exe
+rootdir: C:\Users\kalin\Documents\hackathon_project\TokenBurners
+configfile: pytest.ini
+plugins: anyio-4.16.0
+collecting ... collected 19 items
+
+tests/test_reading_diagnostics.py::test_complete_json_notice_feed_is_a_healthy_control PASSED [  5%]
+tests/test_reading_diagnostics.py::test_stylesheet_text_in_buyer_cannot_verify_a_read PASSED [ 10%]
+tests/test_reading_diagnostics.py::test_one_unidentified_notice_makes_coverage_unverified PASSED [ 15%]
+tests/test_reading_diagnostics.py::test_json_listing_can_open_html_notice_details PASSED [ 21%]
+tests/test_reading_diagnostics.py::test_authoritative_empty_feed_is_a_verified_empty_read PASSED [ 26%]
+tests/test_reading_diagnostics.py::test_login_wall_on_known_documents_is_detected_on_next_read PASSED [ 31%]
+tests/test_reading_diagnostics.py::test_document_login_on_initial_read_is_detected PASSED [ 36%]
+tests/test_reading_diagnostics.py::test_html_fragment_cannot_be_published_as_a_pdf PASSED [ 42%]
+tests/test_reading_diagnostics.py::test_first_read_skips_files_for_explicitly_closed_archive PASSED [ 47%]
+tests/test_judge_regressions.py::test_judge_portal_url_to_verified_file_bytes[hard] PASSED [ 52%]
+tests/test_judge_regressions.py::test_judge_portal_url_to_verified_file_bytes[easy] PASSED [ 57%]
+tests/test_judge_regressions.py::test_judge_portal_url_to_verified_file_bytes[invalid-proposal] PASSED [ 63%]
+tests/test_judge_regressions.py::test_judge_portal_url_to_verified_file_bytes[numbered-with-total] PASSED [ 68%]
+tests/test_judge_regressions.py::test_deadline_without_zone_stays_unknown_and_closed_source_status_wins PASSED [ 73%]
+tests/test_judge_regressions.py::test_two_page_numbered_pager_preserves_the_filter_and_requires_local_evidence PASSED [ 78%]
+tests/test_judge_regressions.py::test_identical_failed_attach_proposals_stop_before_a_strong_model_call PASSED [ 84%]
+tests/test_judge_regressions.py::test_team_mock_recovers_a_path_id_and_uses_the_declared_locale PASSED [ 89%]
+tests/test_judge_regressions.py::test_names_use_header_encoding_and_archive_evidence PASSED [ 94%]
+tests/test_judge_regressions.py::test_upgrade_archives_only_rows_published_by_a_failed_first_read PASSED [100%]
+
+============================= 19 passed in 1.82s ==============================

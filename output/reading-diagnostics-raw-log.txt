@@ -1,0 +1,112 @@
+.FFFFF.FF                                                                [100%]
+================================== FAILURES ===================================
+_____________ test_stylesheet_text_in_buyer_cannot_verify_a_read ______________
+tests\test_reading_diagnostics.py:76: in test_stylesheet_text_in_buyer_cannot_verify_a_read
+    assert not check_health(None, result).ok
+E   AssertionError: assert not True
+E    +  where True = Health(ok=True, problems=[], missing_document_ids=set()).ok
+E    +    where Health(ok=True, problems=[], missing_document_ids=set()) = check_health(None, ReadResult(tenders=[Tender(id='N1', url='https://portal.example/notice/1', title='Contract 1', buyerName='Retour .sdmC...tried=0, documents_failed=0, documents_kept=0, tender_ids_with_document_links=None, detail_urls={}, source_statuses={}))
+___________ test_one_unidentified_notice_makes_coverage_unverified ____________
+tests\test_reading_diagnostics.py:97: in test_one_unidentified_notice_makes_coverage_unverified
+    assert not check_health(None, result).ok
+E   AssertionError: assert not True
+E    +  where True = Health(ok=True, problems=[], missing_document_ids=set()).ok
+E    +    where Health(ok=True, problems=[], missing_document_ids=set()) = check_health(None, ReadResult(tenders=[Tender(id='N1', url='https://portal.example/notice/1', title='Contract 1', buyerName='City', publi...tried=0, documents_failed=0, documents_kept=0, tender_ids_with_document_links=None, detail_urls={}, source_statuses={}))
+_______________ test_json_listing_can_open_html_notice_details ________________
+brain\run_recipe.py:629: in _parse_page
+    return response.json()
+           ^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\httpx\_models.py:832: in json
+    return jsonlib.loads(self.content, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\json\__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\json\decoder.py:338: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\json\decoder.py:356: in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+E   json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+The above exception was the direct cause of the following exception:
+tests\test_reading_diagnostics.py:113: in test_json_listing_can_open_html_notice_details
+    parsed, raw = _read(recipe, pages)
+                  ^^^^^^^^^^^^^^^^^^^^
+tests\test_reading_diagnostics.py:35: in _read
+    return asyncio.run(exercise())
+           ^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\asyncio\runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\asyncio\base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_reading_diagnostics.py:31: in exercise
+    return parsed, await run_recipe(parsed, fetcher.for_portal("diagnostic"))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+brain\run_recipe.py:289: in run_recipe
+    source = _parse_page(detail_response, recipe.kind)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+brain\run_recipe.py:633: in _parse_page
+    raise RecipeReadError(f"could not parse portal response as {kind}") from exc
+E   brain.run_recipe.RecipeReadError: could not parse portal response as json_api
+___________ test_authoritative_empty_feed_is_a_verified_empty_read ____________
+tests\test_reading_diagnostics.py:124: in test_authoritative_empty_feed_is_a_verified_empty_read
+    assert check_health(None, ReadResult(tenders=[], raw_count=0)).ok
+E   AssertionError: assert False
+E    +  where False = Health(ok=False, problems=['no tenders found'], missing_document_ids=set()).ok
+E    +    where Health(ok=False, problems=['no tenders found'], missing_document_ids=set()) = check_health(None, ReadResult(tenders=[], raw_count=0, deadline_times_seen=0, documents_tried=0, documents_failed=0, documents_kept=0, tender_ids_with_document_links=None, detail_urls={}, source_statuses={}))
+E    +      where ReadResult(tenders=[], raw_count=0, deadline_times_seen=0, documents_tried=0, documents_failed=0, documents_kept=0, tender_ids_with_document_links=None, detail_urls={}, source_statuses={}) = ReadResult(tenders=[], raw_count=0)
+_________ test_login_wall_on_known_documents_is_detected_on_next_read _________
+tests\test_reading_diagnostics.py:181: in test_login_wall_on_known_documents_is_detected_on_next_read
+    asyncio.run(exercise())
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\asyncio\runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\asyncio\base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_reading_diagnostics.py:175: in exercise
+    assert state["file_requests"] >= 2
+E   assert 1 >= 2
+_______________ test_html_fragment_cannot_be_published_as_a_pdf _______________
+tests\test_reading_diagnostics.py:235: in test_html_fragment_cannot_be_published_as_a_pdf
+    asyncio.run(exercise())
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\asyncio\runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\WindowsApps\OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt\dependencies\python\Lib\asyncio\base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_reading_diagnostics.py:230: in exercise
+    assert db.portal_get(portal_id)["state"] == "failed"
+E   AssertionError: assert 'serving' == 'failed'
+E     
+E     - failed
+E     + serving
+__________ test_first_read_skips_files_for_explicitly_closed_archive __________
+tests\test_reading_diagnostics.py:264: in test_first_read_skips_files_for_explicitly_closed_archive
+    assert fetched == ["/files/1.pdf"]
+E   AssertionError: assert ['/files/1.pd.../files/4.pdf'] == ['/files/1.pdf']
+E     
+E     Left contains 3 more items, first extra item: '/files/2.pdf'
+E     Use -v to get more diff
+=========================== short test summary info ===========================
+FAILED tests/test_reading_diagnostics.py::test_stylesheet_text_in_buyer_cannot_verify_a_read
+FAILED tests/test_reading_diagnostics.py::test_one_unidentified_notice_makes_coverage_unverified
+FAILED tests/test_reading_diagnostics.py::test_json_listing_can_open_html_notice_details
+FAILED tests/test_reading_diagnostics.py::test_authoritative_empty_feed_is_a_verified_empty_read
+FAILED tests/test_reading_diagnostics.py::test_login_wall_on_known_documents_is_detected_on_next_read
+FAILED tests/test_reading_diagnostics.py::test_html_fragment_cannot_be_published_as_a_pdf
+FAILED tests/test_reading_diagnostics.py::test_first_read_skips_files_for_explicitly_closed_archive
+7 failed, 2 passed in 0.88s
