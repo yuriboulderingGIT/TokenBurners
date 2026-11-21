@@ -49,7 +49,7 @@ reported separately because some portals make their notices public but restrict 
 | `OPENAI_API_KEY` | required | Project key used for learning and repair |
 | `OPENAI_MODEL` / `OPENAI_MODEL_STRONG` | `gpt-5-mini` / `gpt-5` | Attach and repair models |
 | `LLM_BUDGET_USD` | `5` | Maximum cumulative modeled spend per persistent data folder, including reservations |
-| `LLM_CACHE` | `1` | Reuse identical model answers |
+| `LLM_CACHE` | `0` | `1` reuses identical model answers (development only: a bad answer would repeat on every retry) |
 | `REFRESH_MINUTES` / `FAILED_RETRY_MINUTES` | `15` / `180` | Healthy refresh and failed-portal retry intervals |
 | `REFRESH_REPAIR_MINUTES` | `60` | A refresh of a failed portal starts a model repair or a new attach at most this often |
 | `DOC_REVALIDATIONS_PER_READ` | `30` | Known documents checked again per read, stalest first |
