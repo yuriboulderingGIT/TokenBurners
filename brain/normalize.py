@@ -1,6 +1,7 @@
 """Convert extracted values into the tender API's data types."""
 
 import re
+import unicodedata
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -61,6 +62,48 @@ _WITHDRAWN = {
     "zurückgezogen", "aufgehoben", "ingetrokken", "cancelado", "anulado",
 }
 _CLOSED = {"closed", "expired", "clôturé", "geschlossen", "gesloten", "cerrado"}
+# Status or notice-type labels, matched as word starts after _fold (lower case, no accents, words split).
+# "A wrong value is worse than a missing one": an award or result notice is no longer open, and a
+# cancelled or terminated procedure is withdrawn. Anything else listed stays open, as before.
+_WITHDRAWN_WORDS = re.compile(
+    r"\b(?:cancel|annul|withdraw|revoked|revocat|terminated|zuruckgezogen|aufgehoben|aufhebung|ingetrokken|"
+    r"intrekking|beeindig|stopgezet|anulad|cancelad|odwolan|uniewazn|zrusen|avlyst|aflyst|avbrut|peruttu|"
+    r"peruutettu|keskeytet)|\bsans suite\b"
+)
+_CLOSED_WORDS = re.compile(
+    r"\b(?:closed|expired|award|result|completed|unsuccessful|abgeschlossen|beendet|vergeben|zuschlag|"
+    r"gegund|gunning|afgerond|gesloten|attribu|resultat|clotur|infructueu|adjudica|formalizad|resuelt|"
+    r"desiert|cerrad|aggiudica|esito|chius|scadut|rozstrzygnie|wynik|zakonczon|ukoncen|zadan[aoy]?\b|"
+    r"tildel|tilldel|lukket|stengt)"
+)
+_FOLD = str.maketrans({"ł": "l", "ø": "o", "æ": "ae", "ß": "ss", "đ": "d", "_": " ", "-": " "})
+
+
+def _fold(text: str) -> str:
+    """'TenderResultNotice' / 'Aufgehoben' / 'Odwołany' -> 'tender result notice' / 'aufgehoben' / 'odwolany'."""
+    text = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text).casefold().translate(_FOLD)
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
+
+
+def _status(source: str, deadline: datetime | None, deadline_day: datetime | None) -> str:
+    label = source.casefold()
+    if label in _WITHDRAWN:
+        return "withdrawn"
+    if label in _CLOSED:
+        return "closed"
+    words = _fold(source) if len(source) <= 120 else ""  # a status is a short label, not a description
+    if _WITHDRAWN_WORDS.search(words):
+        return "withdrawn"
+    if _CLOSED_WORDS.search(words):
+        return "closed"
+    now = datetime.now(timezone.utc)
+    if deadline and deadline <= now:
+        return "closed"
+    # A deadline given as a date only is not published (inventing a time would be a wrong value),
+    # but once that whole day has passed the tender is no longer open.
+    if deadline is None and deadline_day is not None and deadline_day.date() < now.date():
+        return "closed"
+    return "open"
 
 
 def normalize(raw: RawTender, locale: Locale) -> Tender | None:
@@ -83,13 +126,10 @@ def normalize(raw: RawTender, locale: Locale) -> Tender | None:
                 updates["country"] = "GB" if suffix == "UK" else suffix
             locale = locale.model_copy(update=updates)
     publication = _parse_date(_single_text(fields.get("publicationDate")), locale)
-    deadline = _deadline(_single_text(fields.get("submissionDeadline")), locale)
-    source_status = _label(fields.get("status"))
-    status = "open"
-    if source_status in _WITHDRAWN:
-        status = "withdrawn"
-    elif source_status in _CLOSED or (deadline and deadline <= datetime.now(timezone.utc)):
-        status = "closed"
+    deadline_text = _single_text(fields.get("submissionDeadline"))
+    deadline = _deadline(deadline_text, locale)
+    deadline_day = _parse_date(deadline_text, locale) if deadline is None and deadline_text else None
+    status = _status(_single_text(fields.get("status")) or "", deadline, deadline_day)
     return Tender(
         id=tender_id,
         url=raw.url,

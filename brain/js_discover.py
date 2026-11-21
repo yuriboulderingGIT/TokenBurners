@@ -69,6 +69,8 @@ Only use a next_page selector when the response provides a next-page URL.
 Use only fields shown in the evidence. Do not invent IDs, URLs, or pagination rules.
 Map fields to id, url, title, buyerName, publicationDate, submissionDeadline, status,
 referenceNumber, description, procedureType, contractNature, and cpvCodes when present.
+For status, prefer the value that names the notice's state or type (open, awarded, cancelled)
+over a publishing flag such as "published".
 Prefer feeds whose records contain the data directly. Do not supply any endpoint URL."""
 
 

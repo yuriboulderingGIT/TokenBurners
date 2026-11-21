@@ -205,9 +205,12 @@ def test_graphql_reselects_the_intended_operation(monkeypatch):
     asyncio.run(exercise())
 
 
-def test_unknown_status_and_date_only_deadline_become_open():
+def test_award_status_and_past_date_only_deadline_are_not_open():
+    # Fixed on 21 Nov (tests/test_status_words.py): an award label or a past date-only deadline means
+    # closed; the date-only deadline itself is still not published with an invented time.
     item = tender(1, status='awarded', submissionDeadline='2020-01-01')
-    assert item.status == 'open' and item.submissionDeadline is None
+    assert item.status == 'closed' and item.submissionDeadline is None
+    assert tender(2, submissionDeadline='2020-01-01').status == 'closed'
 
 
 def test_json_listing_cannot_follow_html_detail():
