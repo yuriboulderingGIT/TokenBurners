@@ -1,6 +1,6 @@
 # Watchtower: third judging
 
-Judged 21 Nov 2026 ~04:20 CET at commit `ff45d91` (latest `main`). Same method as [report 1](JUDGE_REPORT.md) and [report 2](JUDGE_REPORT_2.md): fresh volume, `LLM_CACHE=0`, URL-only attach, nobody steering. Tests: **466 passed** inside the image. Locally, 2 browser tests fail without Chromium; one of them should skip like the others. Model spend this round: **$0.28**.
+Judged 21 Nov 2026 ~04:20 CET at commit `8bfbfcf` (latest `main`, the merge that includes `ff45d91`). Same method as [report 1](JUDGE_REPORT.md) and [report 2](JUDGE_REPORT_2.md): fresh volume, `LLM_CACHE=0`, URL-only attach, nobody steering. Tests: **466 passed** inside the image. Locally, 2 browser tests fail without Chromium; one of them should skip like the others. Model spend this round: **$0.28**.
 
 **New this round:** a third private fixture, [`fixture_nl.py`](fixture_nl.py), written after the latest PRs so the team hasn't seen it. It's a Dutch **JavaScript app**: an empty HTML shell, tenders from `/api/v1/aanbestedingen?pagina=N` (`"totaal": 11`), each tender's files from a second API call, and local-time deadlines without an offset (the footer says "Nederlandse tijd" in words). Built-in checker: `python3 -I fixture_nl.py check tenders.json`.
 
