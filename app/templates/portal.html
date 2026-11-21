@@ -2,7 +2,7 @@
 {% block title %}{{ host }} · Watchtower{% endblock %}
 
 {% block content %}
-  <a class="crumb" href="/">← All portals</a>
+  <a class="crumb" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>All portals</a>
 {% if portal is none %}
   <div class="title"><h1>Portal not found</h1></div>
   <p class="muted">It may have been removed. Go back to the <a href="/">portal monitor</a>.</p>
@@ -32,7 +32,11 @@
   </div>
 
   <div class="stack">
-    <section class="panel glass" aria-label="Tenders">
+    <div class="seg tabs" role="group" aria-label="Show">
+      <button type="button" data-tab="tenders" aria-pressed="true">Tenders <span class="faint">{{ tenders|length }}</span></button>
+      <button type="button" data-tab="runs" aria-pressed="false">What the system did <span class="faint">{{ runs|length }}</span></button>
+    </div>
+    <section class="panel glass" id="tab-tenders" aria-label="Tenders">
       <div class="panel-head"><h2>Tenders</h2>
         <span class="faint">{{ "kept from the last correct read while the portal is " ~ portal.state if portal.state in ("healing", "failed") and tenders else tenders|length ~ " total" }}</span></div>
       <div class="scroll">
@@ -74,7 +78,7 @@
       </div>
     </section>
 
-    <section class="panel glass" aria-label="Runs">
+    <section class="panel glass" id="tab-runs" aria-label="Runs" hidden>
       <div class="panel-head"><h2>What the system did</h2><span class="faint">every read and repair, newest first</span></div>
       <ul class="feed">
         {% for r in runs %}
@@ -97,6 +101,17 @@
 
 {% block script %}
 {% if portal is not none %}
+  // One tab at a time; the choice survives the 10 s reload. Storage can be blocked: then Tenders.
+  function showTab(name) {
+    document.querySelectorAll("[data-tab]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.tab === name));
+    document.getElementById("tab-tenders").hidden = name !== "tenders";
+    document.getElementById("tab-runs").hidden = name !== "runs";
+  }
+  document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
+    showTab(b.dataset.tab);
+    try { localStorage.setItem("wt.tab", b.dataset.tab); } catch {}
+  }));
+  try { if (localStorage.getItem("wt.tab") === "runs") showTab("runs"); } catch {}
   document.getElementById("refresh").addEventListener("click", async (e) => {
     e.target.disabled = true;
     try {
