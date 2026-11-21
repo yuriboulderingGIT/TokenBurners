@@ -27,6 +27,41 @@ def test_localized_records_outrank_settings_with_ids_and_titles():
     assert js_discover._feed_rank(notices, "/api/avis") > js_discover._feed_rank(settings, "/api/config")
 
 
+def test_a_dutch_tender_feed_is_recognised_and_outranks_region_codes():
+    # tenderned.nl: the feed's path and keys are Dutch, and the app also loads NUTS region codes.
+    publications = {"content": [{"publicatieId": "450459", "aanbestedingNaam": "Aansprakelijkheidsverzekering",
+                                 "opdrachtgeverNaam": "gemeente Hellendoorn", "publicatieDatum": "2026-11-20"}]}
+    regions = [{"code": "NL211", "omschrijving": "Noord-Overijssel"}]
+    feed = js_discover._feed_rank(publications, "/papi/tenderned-rs-tns/v2/publicaties")
+    assert feed >= js_discover._STRONG_FEED > js_discover._feed_rank(regions, "/papi/tenderned-rs-tns/v2/nutscodes")
+
+
+def test_a_slow_app_is_waited_for_while_it_still_loads_scripts(monkeypatch):
+    # tenderned.nl loads 85+ script files through the polite fetcher (1.1 s each) before it asks for
+    # its tenders. Discovery used to give up after a fixed wait and never saw the feed.
+    monkeypatch.setattr(js_discover, "_JSON_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(js_discover, "_QUIET_SECONDS", 1.0)
+    monkeypatch.setattr(js_discover, "_EXTRA_CAPTURE_SECONDS", 0.05)
+    chain = [f"/chunk{n}.js" for n in range(6)]
+
+    async def exercise():
+        await require_chromium()
+        pages = {f"{BASE}/tenders": f'<script src="{chain[0]}"></script>'}
+        for n, path in enumerate(chain):
+            nxt = (f"var s = document.createElement('script'); s.src = '{chain[n + 1]}'; document.head.appendChild(s);"
+                   if n + 1 < len(chain) else "fetch('/api/tenders');")
+            pages[f"{BASE}{path}"] = nxt
+        pages[f"{BASE}/api/tenders"] = json.dumps({"items": [{"id": "SPA-1", "title": "Library repairs"}]})
+        fetcher = FixtureFetcher(pages, min_interval=0.25)  # six chained files outlast the first wait
+        try:
+            found = await js_discover._capture_json(f"{BASE}/tenders", fetcher.for_portal("fixture"))
+            assert [key for key, _ in found] == [f"{BASE}/api/tenders"]
+        finally:
+            await fetcher.aclose()
+
+    asyncio.run(exercise())
+
+
 class FixtureFetcher(FakeFetcher):
     async def get(self, portal_id, url, **kwargs):
         response = await super().get(portal_id, url, **kwargs)

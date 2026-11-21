@@ -41,7 +41,7 @@ from brain.learn import AttachFailed, TemporaryAttachFailure, learn_recipe
 from brain.llm import LLM, BudgetExceeded, LLMUnavailable
 from brain.normalize import normalize
 from brain.repair import repair
-from brain.run_recipe import PaginationError, RecipeReadError, run_recipe
+from brain.run_recipe import PageLimitExceeded, PaginationError, RecipeReadError, run_recipe
 
 log = logging.getLogger("watchtower.worker")
 _TEMPORARY_ATTACH = "could not attach (temporary portal error): "
@@ -187,10 +187,12 @@ class Worker:
                                  "recipe ready, reading tenders and documents for the first time", run_id)
 
             pagination_page = None
+            too_long = False
             try:
                 result = await self._execute(portal_id, recipe, fetch)
             except RecipeReadError as exc:
                 health = Health(ok=False, problems=[str(exc)])
+                too_long = isinstance(exc, PageLimitExceeded)
                 if isinstance(exc, PaginationError):
                     pagination_page = exc.page_sample
             else:
@@ -229,7 +231,11 @@ class Worker:
 
             problems = "; ".join(health.problems)
             self.db.run_finish(run_id, "failed", f"health check failed: {problems}", cost)
-            if allow_repair:
+            if too_long:
+                # The list outgrew the page limit. A new recipe cannot change its length, so no paid
+                # repair; the last correct tenders stay available and the reason says what to do.
+                states.set_state(self.db, portal_id, states.FAILED, problems, run_id)
+            elif allow_repair:
                 await self._repair(
                     portal_id, recipe, health, fetch,
                     portal_url=portal["url"], pagination_page=pagination_page,

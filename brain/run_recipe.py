@@ -82,6 +82,30 @@ class MissedNextPage(PaginationError):
     """The recipe missed a next link that the listing itself advertises."""
 
 
+class PageLimitExceeded(PaginationError):
+    """The list goes on past MAX_PAGES. No recipe can fix that, so neither attach nor repair asks a model.
+
+    Reading only the first pages is not an option: tenders beyond them would be marked closed.
+    """
+
+    def __init__(self, rows_read: int, advertised: int = 0, estimated_pages: int = 0) -> None:
+        self.rows_read, self.advertised, self.estimated_pages = rows_read, advertised, estimated_pages
+        size = []
+        if estimated_pages > MAX_PAGES:
+            size.append(f"about {estimated_pages} pages advertised")
+        if advertised:
+            size.append(f"{advertised:,} results advertised")
+        size.append(f"{rows_read:,} rows on the first {MAX_PAGES} pages")
+        super().__init__(
+            f"the tender list is longer than the {MAX_PAGES}-page limit ({', '.join(size)}). Reading only part "
+            "of it would wrongly close the other tenders. Add the portal with a narrower list URL, for example "
+            "open tenders only, one buyer or one region"
+        )
+
+    def with_estimate(self, pages: int) -> "PageLimitExceeded":
+        return PageLimitExceeded(self.rows_read, self.advertised, pages)
+
+
 async def run_recipe(
     recipe: Recipe, fetch: PortalFetcher, *, max_tenders: int | None = None,
     verify_all_pages: bool = False,
@@ -303,11 +327,16 @@ async def run_recipe(
                 except (Blocked, RecipeReadError, httpx.HTTPError) as exc:
                     # The listing remains readable when one delegated detail is unavailable.
                     log.info("Berlin document source unavailable: %s", exc)
-            tenders.append(RawTender(url=tender_url, fields=values, document_links=list(dict.fromkeys(document_urls))))
+            # A tender's own page is not one of its documents (tenderned.nl: a recipe mapped both to the
+            # notice link, and every read would "download" thousands of web pages as failed files).
+            document_urls = [url for url in dict.fromkeys(document_urls) if url != tender_url]
+            tenders.append(RawTender(url=tender_url, fields=values, document_links=document_urls))
         if following is None or (not verify_all_pages and max_tenders == sampled):
             break
         page_url = following
     else:
+        if recipe.list_.max_pages >= MAX_PAGES:
+            raise PageLimitExceeded(observed_count, advertised_count)
         raise PaginationError("pagination exceeded the recipe's max_pages")
     if skipped:
         message = f"{skipped} of {sampled} tender detail pages returned HTTP 404 or 410"

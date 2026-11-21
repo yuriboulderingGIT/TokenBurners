@@ -334,7 +334,8 @@ def test_short_public_list_with_incidental_forms_can_be_sampled(widget):
     ("budget", "title_selector", "expected_documents", "failure"),
     [
         (35, "./h2", None, None),
-        (MAX_PAGES + 1, "./h2", None, "max_pages"),
+        (MAX_PAGES + 1, "./h2", None, None),  # capped to the limit and checked on the real pages (test_page_limit)
+        (0, "./h2", None, "max_pages"),
         (35, "./h3", None, "ID and a title"),
         (35, "./h2", {"P2"}, "still have no document links"),
         (35, "./h2", {"beyond-sample"}, None),

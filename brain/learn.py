@@ -19,7 +19,8 @@ from brain.blocks import Blocked, detect_block
 from brain.llm import ScopedLLM
 from brain.normalize import normalize
 from brain.run_recipe import (
-    MAX_PAGES, MissedNextPage, NoPublicNextLink, Origin, PaginationError, RecipeReadError, advertised_next_urls,
+    MAX_PAGES, MissedNextPage, NoPublicNextLink, Origin, PageLimitExceeded, PaginationError, RecipeReadError,
+    advertised_next_urls,
     _advertised_total_count, _attachment_links, canonical_origin, empty_search_url, fetch_page, is_json_response,
     next_page_controls,
     document_base, navigation_view, portal_origin, resolve_portal_url, run_recipe,
@@ -243,7 +244,13 @@ async def validate_candidate(
     require_complete (attach): the sampled tenders must also have their own page and document
     links. Otherwise IncompleteRecipe is raised after every other check has passed.
     """
-    if not 1 <= recipe.list_.max_pages <= MAX_PAGES:
+    estimated_pages = 0
+    if recipe.list_.max_pages > MAX_PAGES:
+        # The model counted more pages than the reader allows. Walk the real pages up to the limit:
+        # either the list ends sooner, or it is too long for any recipe (PageLimitExceeded).
+        estimated_pages = recipe.list_.max_pages
+        recipe.list_.max_pages = MAX_PAGES
+    if recipe.list_.max_pages < 1:
         raise RecipeValidationError(f"max_pages must be between 1 and {MAX_PAGES}")
     if recipe.documents.steps:
         raise RecipeValidationError("document steps are unsupported; use direct document links")
@@ -253,7 +260,10 @@ async def validate_candidate(
         # Keep the source values from each sampled record so we can corroborate its old ID.
         source_values = _HTML_SOURCE_VALUES if recipe.kind == "html" else "$..*"
         sample_recipe = recipe.model_copy(update={"fields": {**recipe.fields, "_source_values": source_values}})
-    rows = await run_recipe(sample_recipe, fetch, max_tenders=_SAMPLE_SIZE, verify_all_pages=True)
+    try:
+        rows = await run_recipe(sample_recipe, fetch, max_tenders=_SAMPLE_SIZE, verify_all_pages=True)
+    except PageLimitExceeded as exc:
+        raise exc.with_estimate(estimated_pages) if estimated_pages else exc
     if not rows:
         raise InvalidListingSample("the list selector found no tenders")
     # A feed or table can mix in records of another kind (a procurement plan notice, a header row)
@@ -582,6 +592,8 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                 require_complete=True,
             )
         except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:
+            if isinstance(exc, PageLimitExceeded):
+                raise AttachFailed(str(exc)) from exc  # no recipe can fix the list's length: no more model calls
             if isinstance(exc, IncompleteRecipe) and exc.recipe is not None:
                 fallback = exc.recipe
                 if exc.no_documents and detail is None:

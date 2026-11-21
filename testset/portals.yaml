@@ -62,7 +62,7 @@ portals:
       markup.
 
   - name: boamp-fr
-    url: "https://boamp-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/boamp/records?select=idweb%2Cobjet%2Cnomacheteur%2Cdateparution%2Cdatelimitereponse%2Cnature_libelle%2Ctype_marche%2Curl_avis&order_by=dateparution%20desc&limit=3"
+    url: "https://boamp-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/boamp/records?select=idweb%2Cobjet%2Cnomacheteur%2Cdateparution%2Cdatelimitereponse%2Cnature_libelle%2Ctype_marche%2Curl_avis&where=datelimitereponse%20%3E%3D%20now%28%29%20AND%20nature_libelle%20%3D%20%27Avis%20de%20march%C3%A9%27%20AND%20code_departement%20%3D%20%2775%27&order_by=idweb&limit=100&offset=0"
     country: FR
     software: BOAMP on Opendatasoft
     kind: spa_json
@@ -71,10 +71,16 @@ portals:
     fixture: fixtures/boamp-fr/list.json
     evidence: https://boamp-datadila.opendatasoft.com/pages/donnees-ouvertes-et-api/
     notes: >
-      The documented anonymous GET API returns records under results, including
-      null and timezone-aware closing timestamps. The URL projects eight
-      non-contact fields and limits the response to three records. Public
-      notice links point to a different origin from the API.
+      Bounded monitoring scope (21 Nov): open contract notices for Paris (75),
+      i.e. deadline in the future, sorted by the stable idweb with an explicit
+      offset so the reader can page. 630 records on 7 pages of 100; the reader
+      read all 630 with distinct IDs without a model call. All of France
+      (6,505 open) would also fit the 100-page limit. The old URL (limit=3, no
+      offset, whole dataset of about 1.73M rows) could not be read completely;
+      the saved fixture still documents that case. BOAMP is a notice
+      aggregator: its records carry no document links, the files sit on each
+      buyer's own platform, so expect "failed: no documents" with the tenders
+      delivered.
 
   - name: tenderned-nl
     url: https://www.tenderned.nl/aankondigingen/overzicht
