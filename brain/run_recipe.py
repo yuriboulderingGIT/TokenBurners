@@ -192,6 +192,7 @@ async def run_recipe(
     observed_count = advertised_count = 0
     sampled = skipped = 0
     search_pages = None
+    scanned_page_urls: list[str] = []
     if recipe.list_.search:
         from brain.public_search import SearchPages
         search_pages = await SearchPages.open(page_url, recipe.list_.search, fetch)
@@ -210,6 +211,8 @@ async def run_recipe(
             if current_url in seen_pages:
                 raise PaginationError("pagination redirected to a previous list page")
             seen_pages.update((page_url, current_url))
+            if current_url not in scanned_page_urls:
+                scanned_page_urls.append(current_url)
             page = _parse_page(response, recipe.kind)
             sample_page = response if recipe.kind == "html" else None
         link_base = document_base(page, current_url)
@@ -279,6 +282,9 @@ async def run_recipe(
                 recipe.kind == "json_api" and page_number == 1
                 and _advertised_total_count(page) == 0
             )
+            if not hasattr(fetch, "recipe_pages"):
+                fetch.recipe_pages = {}
+            fetch.recipe_pages[recipe.list_.url] = scanned_page_urls
             return tenders
 
         collections = json_collection_kinds(page, entries) if recipe.kind == "json_api" else {}
@@ -366,7 +372,24 @@ async def run_recipe(
                 except (ValueError, TypeError, KeyError):
                     values[name] = None
             if detail_url and isinstance(source, html.HtmlElement):
-                fill_notice_fields(values, notice_facts(source))
+                # Independently read the labelled official ID from the notice itself. A selector
+                # can return a plausible value from the wrong table or a database row key.
+                facts = notice_facts(source)
+                selected = _single_text(values.get("id"))
+                labelled = facts.get("id", (None, None))[0]
+                if selected and labelled:
+                    selected_identity = " ".join(selected.split()).casefold()
+                    labelled_identity = " ".join(labelled.split()).casefold()
+                    if selected.startswith(("/", "http://", "https://")):
+                        path_id = unquote(urlsplit(selected).path.rstrip("/").rsplit("/", 1)[-1])
+                        if " ".join(path_id.split()).casefold() == labelled_identity:
+                            selected_identity = labelled_identity
+                    if selected_identity != labelled_identity:
+                        raise ListingFieldMismatch(
+                            f"fields.id disagrees with the labelled value on the notice at {detail_url}: "
+                            f"{selected!r}/{labelled!r}"
+                        )
+                fill_notice_fields(values, facts)
                 title = _single_text(values.get("title"))
                 if title and ":" in title and isinstance(entry, html.HtmlElement):
                     suffix = title.partition(":")[2].strip()
@@ -558,6 +581,9 @@ async def run_recipe(
             raise RecipeReadError(message)
     if verify_all_pages and isinstance(fetch, RunPageCache):
         fetch.scanned_pages[recipe.list_.url] = page_number
+    if not hasattr(fetch, "recipe_pages"):
+        fetch.recipe_pages = {}
+    fetch.recipe_pages[recipe.list_.url] = scanned_page_urls
     if recipe.detail.rendered:
         if recipe.kind != "json_api" or recipe.detail.link or not recipe.fields.get("url"):
             raise RecipeReadError("a rendered detail needs an individual notice URL from a JSON listing")

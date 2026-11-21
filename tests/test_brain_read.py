@@ -87,9 +87,9 @@ def test_missing_next_selector_rejected_even_with_a_full_sample(selector) -> Non
 
 
 @pytest.mark.parametrize("broken", [False, True])
-def test_candidate_checks_page_two_without_fetching_extra_details(broken) -> None:
+def test_candidate_checks_page_two_notice_from_a_different_listing_point(broken) -> None:
     recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
-    pages = _mock_pages(["MOCK-001", "MOCK-002", "MOCK-003"], second_page=True)
+    pages = _mock_pages(["MOCK-001", "MOCK-002", "MOCK-003", "MOCK-004"], second_page=True)
     if broken:
         pages[f"{_MOCK_ORIGIN}/tenders?page=2"] = render_list(2, layout="v2")
 
@@ -97,6 +97,7 @@ def test_candidate_checks_page_two_without_fetching_extra_details(broken) -> Non
         fetcher = FakeFetcher(pages)
         try:
             await validate_candidate(recipe, fetcher.for_portal("test"))
+            return [url for _, _, url in fetcher.request_log]
         finally:
             await fetcher.aclose()
 
@@ -104,7 +105,16 @@ def test_candidate_checks_page_two_without_fetching_extra_details(broken) -> Non
         with pytest.raises(RecipeReadError, match="page 2"):
             asyncio.run(validate())
     else:
-        asyncio.run(validate())
+        requested = asyncio.run(validate())
+        assert f"{_MOCK_ORIGIN}/tender/MOCK-004" in requested
+
+
+def test_sampled_notice_rejects_recipe_id_that_conflicts_with_its_label() -> None:
+    recipe = Recipe.model_validate_json(_MOCK_RECIPE.read_text())
+    pages = _mock_pages(["MOCK-001", "MOCK-002", "MOCK-003", "MOCK-004"], second_page=True)
+    recipe.fields["id"] = recipe.fields["referenceNumber"]
+    with pytest.raises(RecipeReadError, match="fields.id disagrees with the labelled value"):
+        asyncio.run(_read(recipe, pages))
 
 
 def test_json_continuation_with_changed_items_is_incomplete() -> None:

@@ -290,6 +290,36 @@ async def validate_candidate(
         raise exc.with_estimate(estimated_pages) if estimated_pages else exc
     if not rows:
         raise InvalidListingSample("the list selector found no tenders")
+    # The full validation walk above establishes pagination coverage, while its detail
+    # samples naturally come from the first page. Reuse the observed page URLs to inspect
+    # notices from later points in the same listing and anonymous session.
+    page_urls = getattr(fetch, "recipe_pages", {}).get(recipe.list_.url, [])
+    if not recipe.list_.search and len(page_urls) > 1:
+        positions = sorted({len(page_urls) // 2, len(page_urls) - 1})
+        known: dict[str, tuple[str, str]] = {}
+        for row in rows:
+            tender = normalize(row, recipe.locale)
+            if tender:
+                known[tender.id] = (tender.url, tender.title or "")
+        for position in positions:
+            page_recipe = sample_recipe.model_copy(update={
+                "list_": sample_recipe.list_.model_copy(update={"url": page_urls[position], "max_pages": 1})
+            })
+            sampled_rows = await run_recipe(page_recipe, fetch, max_tenders=1)
+            if not sampled_rows:
+                raise InvalidListingSample(f"the listing page {position + 1} had no independently readable notice")
+            row = sampled_rows[0]
+            tender = normalize(row, recipe.locale)
+            if tender is None or not tender.id or not tender.title:
+                raise InvalidListingSample(f"the notice sampled from page {position + 1} has no readable ID or title")
+            prior = known.get(tender.id)
+            if prior and prior != (tender.url, tender.title):
+                raise RecipeValidationError(
+                    f"page {position + 1} maps a different notice to the existing tender ID {tender.id!r}"
+                )
+            if not prior:
+                known[tender.id] = (tender.url, tender.title)
+                rows.append(row)
     # A feed or table can mix in records of another kind (a procurement plan notice, a header row)
     # with neither ID nor title. Reads skip those; the sample may too, if most rows are tenders.
     blank = [row for row in rows if not row.fields.get("id") and not row.fields.get("title")]
