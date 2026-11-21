@@ -18,7 +18,8 @@ import asyncio  # noqa: E402
 
 from app import states  # noqa: E402
 from app.fetcher import FakeFetcher  # noqa: E402
-from app.models import Health, RawTender, Recipe, Tender  # noqa: E402
+from app.documents import StoredDocuments  # noqa: E402
+from app.models import Document, Health, RawTender, Recipe, Tender  # noqa: E402
 
 RECIPE = Recipe.model_validate({"list": {"url": "https://portal.example/list", "item": "//tr"}})
 
@@ -36,17 +37,22 @@ def _run_one(worker: Worker, portal_id: str) -> str:
     return run_id
 
 
-def _patch_read(monkeypatch, healthy: bool) -> None:
+def _patch_read(monkeypatch, healthy: bool, documents: bool = True) -> None:
     tender = Tender(id="T1", url="https://portal.example/t1", title="Roads", buyerName="City",
                     publicationDate="2026-11-20", submissionDeadline=None, status="open")
+    links = ["https://portal.example/t1/tender.pdf"] if documents else []
 
     async def fake_run_recipe(recipe, fetch):
-        return [RawTender(url=tender.url)]
+        return [RawTender(url=tender.url, document_links=links)]
+
+    async def fake_store_documents(db, portal_id, tender, links, fetch):
+        return StoredDocuments(documents=[Document(fileName="tender.pdf", sizeBytes=4, sha256="ab", path="/files/x")])
 
     async def no_repair(*args, **kwargs):
         raise AssertionError("a retry must never call repair (model cost)")
 
     monkeypatch.setattr("app.worker.run_recipe", fake_run_recipe)
+    monkeypatch.setattr("app.worker.store_documents", fake_store_documents)
     monkeypatch.setattr("app.worker.normalize", lambda raw, locale: tender)
     monkeypatch.setattr("app.worker.check_health", lambda prev, new: Health(ok=healthy, problems=[] if healthy else ["no tenders found"]))
     monkeypatch.setattr("app.worker.repair", no_repair)
@@ -86,6 +92,25 @@ def test_retry_brings_a_recovered_portal_back_to_serving(monkeypatch) -> None:
     run_id = _run_one(worker, portal_id)
     assert db.portal_get(portal_id)["state"] == states.SERVING
     assert db.one("SELECT result FROM runs WHERE id = ?", (run_id,))["result"] == "ok"
+
+
+def test_tenders_without_any_document_are_reported_failed_without_repair(monkeypatch) -> None:
+    """A healthy list read with no document at all is not a correct delivery: failed, tenders kept, $0."""
+    _patch_read(monkeypatch, healthy=True, documents=False)
+    worker = Worker(db, fetcher=FakeFetcher({}), llm=None)
+    portal_id = db.portal_create("https://portal.example/no-documents")
+    db.recipe_save(portal_id, RECIPE, "attach", 0.0)
+    run_id = _run_one(worker, portal_id)
+    portal = db.portal_get(portal_id)
+    assert portal["state"] == states.FAILED
+    assert portal["reason"].startswith("no documents: 1 tenders delivered")
+    assert [t["id"] for t in db.tenders_for(portal_id)] == ["T1"]  # still delivered through the API
+    run = db.one("SELECT result, notes FROM runs WHERE id = ?", (run_id,))
+    assert run["result"] == "failed" and "no tender documents" in run["notes"]
+    # The timed retry is a plain read: documents that appear later bring it back to serving.
+    _patch_read(monkeypatch, healthy=True, documents=True)
+    _run_one(worker, portal_id)
+    assert db.portal_get(portal_id)["state"] == states.SERVING
 
 
 def test_retry_that_still_fails_stays_failed_without_repair(monkeypatch) -> None:

@@ -41,6 +41,8 @@ def test_worker_keeps_previous_tenders_and_repairs_only_recipe_failures(
             {"id": "$.id", "title": "$.title"} if kind == "json_api"
             else {"id": "@data-id", "title": "text()"}
         ),
+        # Every tender has a document, so a healthy read is a correct delivery (serving).
+        "documents": {"link": "$.doc" if kind == "json_api" else "./a[@class='doc']/@href"},
     })
     db = DB(tmp_path / "recovery.sqlite")
     portal_id = db.portal_create(_ENTRY)
@@ -56,6 +58,8 @@ def test_worker_keeps_previous_tenders_and_repairs_only_recipe_failures(
             return self
 
     def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/files/"):
+            return httpx.Response(200, content=b"%PDF-1.4 tender", headers={"content-type": "application/pdf"})
         old = request.url.path == "/results"
         if old and changed:
             if fault == "missing":
@@ -70,11 +74,11 @@ def test_worker_keeps_previous_tenders_and_repairs_only_recipe_failures(
         ident = "B" if second else "A"
         if kind == "json_api":
             return httpx.Response(200, text=json.dumps({
-                "items": [{"id": ident, "title": f"Tender {ident}"}],
+                "items": [{"id": ident, "title": f"Tender {ident}", "doc": f"/files/{ident}.pdf"}],
                 "total_count": 2,
                 "next": None if second or (old and changed and fault == "total") else "?page=2",
             }))
-        page = f'<ul><li data-id="{ident}">Tender {ident}</li></ul>'
+        page = f'<ul><li data-id="{ident}">Tender {ident}<a class="doc" href="/files/{ident}.pdf">PDF</a></li></ul>'
         if not second:
             page += (
                 '<a href="?page=2">Weiter</a>' if old and changed and fault == "pager"
@@ -110,7 +114,7 @@ def test_worker_keeps_previous_tenders_and_repairs_only_recipe_failures(
             changed = True
             if fault == "bad-detail":
                 broken = recipe.model_copy(deep=True)
-                broken.detail.link = ".//a/@href"
+                broken.detail.link = ".//a[@class='detail']/@href"
                 db.recipe_save(portal_id, broken, "attach", 0)
             worker.request_read(portal_id)
             await asyncio.wait_for(worker.queue.join(), timeout=5)

@@ -223,9 +223,13 @@ def test_attach_run_first_read_reuses_validated_pages(tmp_path, monkeypatch):
     async def exercise():
         db = DB(tmp_path / 'attach.db')
         portal_id = db.portal_create(BASE + '/list')
-        client = FakeFetcher({BASE + '/list': '<html><body><article data-id="1"><h1>Roof</h1></article></body></html>'})
+        client = FakeFetcher({
+            BASE + '/list': '<html><body><article data-id="1"><h1>Roof</h1><a href="/roof.pdf">PDF</a></article></body></html>',
+            BASE + '/roof.pdf': b'%PDF-1.4 roof',
+        })
         recipe = Recipe.model_validate({'list': {'url': BASE + '/list', 'item': '//article'},
-                                        'fields': {'id': '@data-id', 'title': './h1'}})
+                                        'fields': {'id': '@data-id', 'title': './h1'},
+                                        'documents': {'link': './a/@href'}})
         async def learn(url, fetch, llm):
             await validate_candidate(recipe, fetch)
             return recipe
@@ -234,7 +238,7 @@ def test_attach_run_first_read_reuses_validated_pages(tmp_path, monkeypatch):
         try:
             await worker._handle(portal_id, db.run_create(portal_id, 'read'))
             assert db.portal_get(portal_id)['state'] == 'serving', dict(db.portal_get(portal_id))
-            assert len(client.request_log) == 1
+            assert [url for _, _, url in client.request_log if url.endswith('/list')] == [BASE + '/list']
         finally:
             await client.aclose()
     asyncio.run(exercise())

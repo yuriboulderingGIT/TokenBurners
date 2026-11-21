@@ -28,7 +28,7 @@ def test_attach_maps_visible_notice_fields_and_leaves_sparse_notice_fields_absen
         <dt>Work postcode</dt><dd>4000</dd>
         <dt>Work city</dt><dd>Liège</dd>
         <dt>Work country</dt><dd>BE</dd>
-      </dl></article>
+      </dl><a class="doc" href="/files/roof.pdf">Tender documents</a></article>
       <article data-id="B-18"><h2><a href="/notice/18">School desks</a></h2></article>
     </main>"""
     labels = {
@@ -60,6 +60,7 @@ def test_attach_maps_visible_notice_fields_and_leaves_sparse_notice_fields_absen
                     "id": "./@data-id", "title": "./h2/a", "url": "./h2/a/@href",
                     **{key: f".//dt[.='{label}']/following-sibling::dd[1]" for key, label in labels.items()},
                 },
+                "documents": {"link": ".//a[@class='doc']/@href"},
                 "locale": {"tz": "Europe/Brussels", "lang": "en"},
             }
 
@@ -67,7 +68,7 @@ def test_attach_maps_visible_notice_fields_and_leaves_sparse_notice_fields_absen
     portal_id = db.portal_create(url)
 
     async def attach():
-        fetcher = FakeFetcher({url: listing})
+        fetcher = FakeFetcher({url: listing, "https://portal.example/files/roof.pdf": b"%PDF-1.4 roof"})
         worker = Worker(db, fetcher, FixtureLLM())
         try:
             await worker.start()
