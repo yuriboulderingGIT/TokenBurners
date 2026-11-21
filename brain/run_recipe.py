@@ -33,17 +33,30 @@ _NEXT_PAGE_LABELS = {
     "next page", "nächste seite", "volgende pagina", "page suivante",
     "siguiente página", "página siguiente", "pagina successiva", "następna strona",
     "página seguinte", "próxima página", "aller à la page suivante",
+    "další stránka", "ďalšia strana", "következő oldal", "επόμενη σελίδα",
+    "pagina următoare", "pagina urmatoare", "strona następna", "strona nastepna",
+    "sljedeća stranica", "sljedeca stranica", "naslednja stran", "naslednja stranica",
+    "neste side", "nästa sida", "naesta sida", "seuraava sivu", "järgmine leht",
+    "jaunu lapa", "kitas puslapis", "следваща страница",
 }
 _NEXT_LABELS = {
     "next", "weiter", "nächste", "nächster", "volgende", "suivant", "suivante",
     "siguiente", "successiva", "successivo", "następna", "dalej", "seguinte", "próxima",
+    "další", "ďalej", "ďalšia", "következő", "επόμενο", "επόμενη", "următoarea", "urmatoarea",
+    "naslednja", "sljedeća", "sljedeca", "neste", "nästa", "naesta", "seuraava", "järgmine",
+    "jauns", "kitas", "следваща",
 }
 _PAGE_QUERY_KEYS = {
     "p", "page", "pagenum", "pagenumber", "pageindex", "offset", "skip", "start", "cursor", "seite", "pagina",
+    "strana", "stronica", "strona", "sivu", "leht", "lapa", "puslapis",
 }
 _OFFSET_QUERY_KEYS = {"offset", "skip", "start"}
 _TOTAL_KEYS = {"total", "totalcount", "nbtotal", "totalelements", "totalresults", "totalrecords", "totalhits", "nbhits"}
-_PAGER_CONTEXT = re.compile(r"\b(?:pagination|paginator|paging|pager|page navigation)\b", re.I)
+_PAGER_CONTEXT = re.compile(
+    r"\b(?:pagination|paginator|paging|pager|page navigation|paginaci[oó]n|paginazione|"
+    r"paginering|paginacja|str[aá]nkov[aá]n[ií]|lapoz[aá]s|σελιδοπο[iί]ηση|"
+    r"bl[aá]ttere|sivutus|puslapiavimas)\b", re.I,
+)
 _PAGE_PATH_SUFFIX = re.compile(r"/(?:page|seite|pagina)/[0-9]+/?$", re.I)
 _FILE_SUFFIX = re.compile(r"\.(?:pdf|zip|docx?|xlsx?|pptx?|odt|ods|rtf|csv|rar|7z)$", re.I)
 _FILE_LABEL = re.compile(
