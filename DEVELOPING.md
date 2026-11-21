@@ -1,7 +1,5 @@
 # Developing Watchtower
 
-The plan is **`Watchtower_Plan_v2.pdf`** (it replaces the task lists and timeline of
-`Watchtower_Build_Plan.pdf`; the API contract, tender fields and recipe format of plan v1 still hold).
 This page explains how to work in this repo.
 
 ## First-time setup (Windows PowerShell)
