@@ -11,9 +11,14 @@ Built by team TokenBurners for the Patterno track of the MAIN AI Hackathon, Maas
 You need Docker and the OpenAI key we sent you privately.
 
 ```sh
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
+Paste the provided API key inside the .env file after OPENAI_API_KEY=
+and then save it.
+
 docker build -t watchtower .                      # linux/amd64; Chromium is already in the base image
-printf 'OPENAI_API_KEY=%s\n' "<the key we sent you>" > .env    # keep this file private, never commit it
-docker run --name watchtower --rm -p 8080:8080 --env-file .env -v watchtower-data:/data watchtower
+docker run -d --name watchtower -p 127.0.0.1:8080:8080 --env-file .env -v watchtower-data:/data watchtower
+
 ```
 
 Open <http://localhost:8080> for the dashboard and <http://localhost:8080/docs> for the interactive API reference.
