@@ -27,8 +27,13 @@ import logging
 import tempfile
 import time
 from collections import deque
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from email.message import Message
+from email.utils import collapse_rfc2231_value
 from pathlib import Path
+from urllib.parse import unquote
 
 import httpx
 
@@ -101,6 +106,7 @@ class Fetcher:
         self._host_locks: dict[str, asyncio.Lock] = {}
         self._cancelled: set[str] = set()
         self.request_log: deque[tuple[str, float, str]] = deque(maxlen=2000)  # (portal, time, url)
+        self.on_request: Callable[[str], None] | None = None
 
     def for_portal(self, portal_id: str) -> "PortalFetcher":
         return PortalFetcher(self, portal_id)
@@ -113,6 +119,12 @@ class Fetcher:
 
     async def wait_turn(self, portal_id: str, url: str = "") -> None:
         """Block until this portal may make its next request. Every request must call this."""
+        async with self._request_slot(portal_id, url):
+            pass
+
+    @asynccontextmanager
+    async def _request_slot(self, portal_id: str, url: str):
+        """Space requests from receipt of the previous response, including slow first connections."""
         if portal_id in self._cancelled:
             raise PortalCancelled(portal_id)
         host = httpx.URL(url).raw_host.decode("ascii").rstrip(".")
@@ -125,8 +137,11 @@ class Fetcher:
             if portal_id in self._cancelled:
                 raise PortalCancelled(portal_id)
             now = time.monotonic()
-            self._portal_last[portal_id] = self._host_last[host] = now
             self.request_log.append((portal_id, now, url))
+            try:
+                yield
+            finally:
+                self._portal_last[portal_id] = self._host_last[host] = time.monotonic()
 
     async def get(
         self, portal_id: str, url: str, *, follow_redirects: bool = True, **kw
@@ -204,11 +219,13 @@ class Fetcher:
                 else:
                     for name in validators:
                         request.headers.pop(name, None)
-            await self.wait_turn(portal_id, str(request.url))
-            jar = self._jars.setdefault(portal_id, httpx.Cookies())
-            jar.set_cookie_header(request)  # keeps an explicit Cookie header, e.g. a PublicVisit's
-            response = await self._client.send(request, stream=stream)
-            jar.extract_cookies(response)
+            async with self._request_slot(portal_id, str(request.url)):
+                jar = self._jars.setdefault(portal_id, httpx.Cookies())
+                jar.set_cookie_header(request)
+                if self.on_request:
+                    self.on_request(portal_id)
+                response = await self._client.send(request, stream=stream)
+                jar.extract_cookies(response)
             if not follow_redirects or response.next_request is None:
                 return response
             await response.aclose()
@@ -300,9 +317,16 @@ class FakeFetcher(Fetcher):
 
 
 def _filename(response: httpx.Response) -> str | None:
-    disposition = response.headers.get("content-disposition", "")
-    for part in disposition.split(";"):
-        part = part.strip()
-        if part.lower().startswith("filename="):
-            return part.split("=", 1)[1].strip('"') or None
-    return None
+    disposition = Message()
+    disposition["Content-Disposition"] = response.headers.get("content-disposition", "")
+    fallback = None
+    for key, value in disposition.get_params(header="content-disposition", failobj=[]):
+        if key != "filename":
+            continue
+        if isinstance(value, tuple):
+            return collapse_rfc2231_value(value)
+        try:
+            fallback = unquote(value, errors="strict")
+        except UnicodeDecodeError:
+            fallback = value
+    return fallback or None

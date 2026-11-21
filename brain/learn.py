@@ -16,13 +16,14 @@ from app.fetcher import RETRY_STATUSES, PortalFetcher
 from app.health import check_health
 from app.models import OPTIONAL_TENDER_FIELDS, ReadResult, Recipe, Tender
 from brain.blocks import Blocked, detect_block
-from brain.llm import ScopedLLM
-from brain.normalize import normalize
+from brain.llm import BudgetExceeded, LLMUnavailable, ScopedLLM
+from brain.normalize import normalize, shows_deadline_time
+from brain.notice_fields import notice_facts
 from brain.run_recipe import (
     MAX_PAGES, MissedNextPage, NoPublicNextLink, NotANotice, Origin, PageLimitExceeded, PaginationError,
     RecipeReadError, advertised_next_urls,
     _advertised_total_count, _attachment_links, canonical_origin, empty_search_url, fetch_page, is_json_response,
-    next_page_controls,
+    _numbered_pager, full_notice_url, next_page_controls,
     document_base, navigation_view, portal_origin, resolve_portal_url, run_recipe,
 )
 from brain.public_search import api_subdomain
@@ -79,6 +80,7 @@ class IncompleteRecipe(RecipeValidationError):
         self.no_documents = no_documents
         self.shared_url = shared_url
         self.tender_urls = tender_urls  # the sampled tenders' own pages, to look for documents there
+        self.coverage = (0, 0, 0)
 
 
 def _files_visible(page: "PageSample | None") -> bool:
@@ -90,7 +92,7 @@ def _files_visible(page: "PageSample | None") -> bool:
         if (urlsplit(href).path.lower().endswith(_FILES) or "download" in href.lower()
                 or anchor.get("download") is not None):
             return True
-    return False
+    return bool(_attachment_links(page.document, document_base(page.document, page.url)))
 
 
 def _unique_ids(pairs: Iterable[tuple[str | None, str]]) -> dict[str, str]:
@@ -238,7 +240,13 @@ async def detail_sample(
     if not url or url == listing.url:
         return None
     try:
-        return await read_page_sample(url, fetch, origin)
+        page = await read_page_sample(url, fetch, origin)
+        if page.document is not None:
+            target = full_notice_url(page.document, document_base(page.document, page.url), origin)
+            if target:
+                page = await read_page_sample(target, fetch, origin)
+                page.requested_url = url
+        return page
     except (Blocked, RecipeReadError, httpx.HTTPError):
         # A speculative sample can be stale or gated. The recipe still has to pass a real read.
         return None
@@ -299,7 +307,8 @@ async def validate_candidate(
                     f"the sampled tender {tender.title!r} must keep its stored ID {expected!r}, "
                     f"but fields.id returned {tender.id!r}"
                 )
-    health = check_health(None, ReadResult(tenders=tenders, raw_count=len(rows)))
+    health = check_health(None, ReadResult(tenders=tenders, raw_count=len(rows),
+                                           deadline_times_seen=sum(shows_deadline_time(row) for row in rows)))
     if not health.ok:
         raise RecipeValidationError("; ".join(health.problems))
     if expected_document_ids:
@@ -331,10 +340,45 @@ async def validate_candidate(
                     "no sampled row shows a deadline, buyer or publication date: check that list.item "
                     "selects the tender rows and map those fields"
                 )
-            raise IncompleteRecipe(
+            incomplete = IncompleteRecipe(
                 "; ".join(missing), no_documents=no_documents, shared_url=shared_url,
                 tender_urls=[tender.url for tender in tenders],
             )
+            incomplete.coverage = (sum(bool(row.document_links) for row in rows),
+                                   len(set(incomplete.tender_urls)),
+                                   sum(bool(t.submissionDeadline) + bool(t.buyerName) for t in tenders))
+            raise incomplete
+
+
+def _detail_alternative(listing: PageSample, detail: PageSample | None, previous: Recipe | None) -> Recipe | None:
+    """Build a candidate from the observed title column and labelled facts on its linked notice."""
+    if listing.document is None or detail is None or detail.document is None or not _files_visible(detail):
+        return None
+    facts = notice_facts(detail.document)
+    if "id" not in facts or not detail.requested_url:
+        return None
+    title = listing.links.get(detail.requested_url)
+    headings = [node for node in detail.document.xpath("//h1 | //h2") if " ".join(node.text_content().split()) == title]
+    if len(headings) != 1 or len(detail.document.xpath("//" + headings[0].tag)) != 1:
+        return None
+    tables = listing.document.xpath("//table[.//tr[td and .//a[@href]]]")
+    if len(tables) != 1:
+        return None
+    base = document_base(listing.document, listing.url)
+    columns = {len(cell.xpath("preceding-sibling::td")) + 1 for cell in tables[0].xpath(".//tr/td")
+               if any(resolve_portal_url(base, href, portal_origin(listing.url)) == detail.requested_url
+                      for href in cell.xpath(".//a/@href"))}
+    if len(columns) != 1:
+        return None
+    fields = {key: xpath for key, (_, xpath) in facts.items() if key != "placeOfPerformance"}
+    fields["title"] = "//" + headings[0].tag
+    # Every row must resolve to one notice. Sample validation checks the whole page chain.
+    return Recipe.model_validate({
+        "list": {"url": listing.url, "item": "//table[.//tr[td and .//a[@href]]]//tr[td]",
+                 "max_pages": MAX_PAGES, "next_page": _LABELLED_NEXT, "scope_label": listing.scope_label()},
+        "detail": {"link": f"./td[{columns.pop()}]//a[@href and not(@download)]/@href"},
+        "fields": fields, "locale": previous.locale if previous else {},
+    })
 
 
 async def propose_html_recipe(
@@ -371,7 +415,8 @@ async def propose_html_recipe(
             "Map title, buyerName, publicationDate, "
             "submissionDeadline and status to their source values. Use fields.url for the "
             "tender's own permalink when shown. Look for referenceNumber, description, "
-            "procedureType, contractNature and cpvCodes. Map the place of performance "
+            "procedureType (open/restricted/negotiated/other), contractNature (works/services/supplies) "
+            "and cpvCodes. Extract their original source text for normalization. Map the place of performance "
             "using flat keys placeOfPerformance.postalCode, placeOfPerformance.city and "
             "placeOfPerformance.countryCode. Use strings for all values in fields, and omit "
             "keys for data the portal does not show. Use documents.link for direct document URLs. "
@@ -538,7 +583,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
             if listing.document is not None and len(listing.document.xpath("//tr[td[3] and td//a[@href]]")) >= 2:
                 # A paged results table is already a listing, even if its menu
                 # also advertises an advanced-search or category directory.
-                if next_page_controls(listing.navigation, listing.url):
+                if next_page_controls(listing.navigation, listing.url) or _numbered_pager(listing.navigation, listing.url):
                     target = listing.url
             if target is None:
                 if step == 0:
@@ -552,6 +597,9 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                     }, ensure_ascii=False), system=_SYSTEM)
                     i = answer.get("index") if isinstance(answer, dict) else None
                     target = choices[i] if type(i) is int and 0 <= i < len(choices) else None
+                if (target is None and listing.document is not None
+                        and listing.document.xpath("//script[@src]") and not listing.document.xpath("//tr[td[2]]")):
+                    return await _learn_public_feed(listing, fetch, llm, shell_reason)
                 if target is None:
                     raise RecipeValidationError("listing URL was not observed on the portal")
             if target == listing.url:
@@ -583,7 +631,8 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
         except NoPublicNextLink as exc:
             reason = f"{exc} and no usable public tender feed was found"
             return await _learn_public_feed(listing, fetch, llm, reason)
-        if not next_links and _advertised_total_count(listing.document):
+        if (not next_links and _advertised_total_count(listing.document)
+                and not _numbered_pager(listing.navigation, listing.url)):
             return await _learn_public_feed(listing, fetch, llm, "the listing loads further results dynamically")
         preferred = discovery.get("detail_url")
         if not _observed_url(preferred, listing, origin):
@@ -591,7 +640,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
             if listing.document is not None:
                 base = document_base(listing.document, listing.url)
                 for row in listing.document.xpath(
-                    "//tr[td[3] and td//a[@href]] | //article[.//header//a[@href]]"
+                    "//tr[td[2] and td//a[@href]] | //article[.//header//a[@href]]"
                     " | //tr[.//a[contains(@href, 'contract_display_')]]"
                 )[:_SAMPLE_SIZE]:
                     targets = {_observed_url(href, listing, origin) for href in row.xpath(".//a/@href")}
@@ -607,6 +656,8 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
     feedback: list[str] = []
     pagination_page = None
     fallback: Recipe | None = None  # reads tenders, but without their documents or own pages
+    best_coverage = (-1, -1, -1)
+    tried_table = False
     asked_again = False
     for strong in [False] * max(0, 3 - navigation_calls) + [True]:
         if fallback is not None:
@@ -618,11 +669,28 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                 listing, detail, fetch, llm, strong=strong, feedback=feedback, pagination_page=pagination_page,
                 require_complete=True,
             )
+        except (BudgetExceeded, LLMUnavailable) as exc:
+            if feedback:
+                raise type(exc)(f"{exc}. Last candidate failed: {feedback[-1]}") from exc
+            raise
         except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:
             if isinstance(exc, PageLimitExceeded):
                 raise AttachFailed(str(exc)) from exc  # no recipe can fix the list's length: no more model calls
+            if not tried_table and (table := _detail_alternative(listing, detail, getattr(exc, "recipe", None))):
+                tried_table = True
+                try:
+                    await validate_candidate(table, fetch, require_complete=True)
+                except PageLimitExceeded as limit:
+                    raise AttachFailed(str(limit)) from limit
+                except (RecipeReadError, RecipeValidationError):
+                    pass  # the alternative must meet the same checks as the model's proposal
+                else:
+                    table.learned_by = f"{llm.model_name} discovery, verified table"
+                    table.learned_at = now_iso()
+                    return table
             if isinstance(exc, IncompleteRecipe) and exc.recipe is not None:
-                fallback = exc.recipe
+                if exc.coverage > best_coverage:
+                    fallback, best_coverage = exc.recipe, exc.coverage
                 if exc.no_documents and detail is None:
                     # No tender page was sampled yet: open one (a single request) to see whether
                     # it holds documents. It also becomes evidence for the next attempt.
@@ -636,8 +704,9 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                 if not missed or asked_again:
                     break
             message = str(exc).strip() or type(exc).__name__
-            if message not in feedback:
-                feedback.append(message)
+            if message in feedback:
+                break  # Two proposals failed the same check on the same listing.
+            feedback.append(message)
             if isinstance(exc, PaginationError) and exc.page_sample:
                 pagination_page = exc.page_sample
             if isinstance(exc, (InvalidListingSample, NotANotice)) and listing is entry and not strong:
@@ -653,7 +722,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                     feedback = []
                     pagination_page = None
     if fallback is not None:
-        # Deliver the tenders; the worker reports the missing documents as the portal's state.
+        # The worker checks document coverage before deciding whether this read may be published.
         return fallback
     search_url = empty_search_url(listing.navigation, listing.url)
     if search_url and search_url not in visited and feedback == ["the list selector found no tenders"]:

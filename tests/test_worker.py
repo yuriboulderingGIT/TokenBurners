@@ -95,7 +95,7 @@ def test_retry_brings_a_recovered_portal_back_to_serving(monkeypatch) -> None:
 
 
 def test_tenders_without_any_document_are_reported_failed_without_repair(monkeypatch) -> None:
-    """A healthy list read with no document at all is not a correct delivery: failed, tenders kept, $0."""
+    """An unverified first read cannot publish a snapshot. A later plain read can recover."""
     _patch_read(monkeypatch, healthy=True, documents=False)
     worker = Worker(db, fetcher=FakeFetcher({}), llm=None)
     portal_id = db.portal_create("https://portal.example/no-documents")
@@ -103,14 +103,23 @@ def test_tenders_without_any_document_are_reported_failed_without_repair(monkeyp
     run_id = _run_one(worker, portal_id)
     portal = db.portal_get(portal_id)
     assert portal["state"] == states.FAILED
-    assert portal["reason"].startswith("no documents: 1 tenders delivered")
-    assert [t["id"] for t in db.tenders_for(portal_id)] == ["T1"]  # still delivered through the API
+    assert portal["reason"].startswith("no documents: found 1 tender")
+    assert db.tenders_for(portal_id) == []
+    assert portal["tender_count"] == 0 and portal["last_success_at"] is None
     run = db.one("SELECT result, notes FROM runs WHERE id = ?", (run_id,))
-    assert run["result"] == "failed" and "no tender documents" in run["notes"]
+    assert run["result"] == "failed" and "not published" in run["notes"]
     # The timed retry is a plain read: documents that appear later bring it back to serving.
     _patch_read(monkeypatch, healthy=True, documents=True)
     _run_one(worker, portal_id)
     assert db.portal_get(portal_id)["state"] == states.SERVING
+    snapshot = db.tenders_for(portal_id)
+    last_success = db.portal_get(portal_id)["last_success_at"]
+    assert snapshot[0]["documents"]
+    _patch_read(monkeypatch, healthy=True, documents=False)
+    _run_one(worker, portal_id)
+    assert db.portal_get(portal_id)["state"] == states.FAILED
+    assert db.portal_get(portal_id)["last_success_at"] == last_success
+    assert db.tenders_for(portal_id) == snapshot
 
 
 def test_retry_that_still_fails_stays_failed_without_repair(monkeypatch) -> None:

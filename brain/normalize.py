@@ -36,6 +36,9 @@ _COUNTRY_ZONES = {
     "RO": "Europe/Bucharest", "SE": "Europe/Stockholm", "SI": "Europe/Ljubljana",
     "SK": "Europe/Bratislava", "UK": "Europe/London",
 }
+_LOCAL_ZONE = re.compile(r"\s*\((?:Ortszeit|local time)\s+([A-Za-z_/ -]+)\)\s*$", re.I)
+_CITY_ZONES = {zone.split("/")[-1].replace("_", " ").casefold(): zone for zone in _COUNTRY_ZONES.values()}
+_CITY_ZONES.update({zone.casefold(): zone for zone in _COUNTRY_ZONES.values()})
 _DAY_FIRST_LANGUAGES = {"cs", "de", "es", "fr", "it", "nl", "pl"}
 _PROCEDURES = {
     "open": "open", "open procedure": "open", "offenes verfahren": "open",
@@ -49,18 +52,18 @@ _PROCEDURES = {
     "other": "other",
 }
 _NATURES = {
-    "works": "works", "bauleistungen": "works", "travaux": "works",
+    "works": "works", "bauleistung": "works", "bauleistungen": "works", "travaux": "works",
     "werken": "works", "obras": "works",
-    "services": "services", "dienstleistungen": "services", "diensten": "services",
+    "services": "services", "dienstleistung": "services", "dienstleistungen": "services", "diensten": "services",
     "servicios": "services",
-    "supplies": "supplies", "lieferleistungen": "supplies", "fournitures": "supplies",
+    "supplies": "supplies", "lieferleistung": "supplies", "lieferleistungen": "supplies", "fournitures": "supplies",
     "leveringen": "supplies", "suministros": "supplies",
 }
 _WITHDRAWN = {
     "withdrawn", "cancelled", "canceled", "annulé", "annulée",
     "zurückgezogen", "aufgehoben", "ingetrokken", "cancelado", "anulado",
 }
-_CLOSED = {"closed", "expired", "clôturé", "geschlossen", "gesloten", "cerrado"}
+_CLOSED = {"closed", "expired", "clôturé", "geschlossen", "abgelaufen", "beendet", "gesloten", "cerrado", "uzavřeno"}
 
 
 def normalize(raw: RawTender, locale: Locale) -> Tender | None:
@@ -69,6 +72,12 @@ def normalize(raw: RawTender, locale: Locale) -> Tender | None:
     tender_id = _single_text(fields.get("id"))
     if not tender_id:
         return None
+    if raw.source_language and not locale.lang:
+        locale = locale.model_copy(update={"lang": raw.source_language})
+    if raw.source_language and not locale.country and not locale.tz:
+        region = raw.source_language.replace("_", "-").partition("-")[2].upper()
+        if region in _COUNTRY_ZONES:
+            locale = locale.model_copy(update={"country": region})
     if not locale.country:
         try:
             host = urlsplit(raw.url).hostname or ""
@@ -161,15 +170,28 @@ def _parse_date(value: str | None, locale: Locale) -> datetime | None:
 
 
 def _deadline(value: str | None, locale: Locale) -> datetime | None:
+    zone = locale.tz or _COUNTRY_ZONES.get((locale.country or "").upper())
     if value:
+        local_zone = _LOCAL_ZONE.search(value)
+        if local_zone:
+            declared = _CITY_ZONES.get(local_zone[1].casefold())
+            if not declared:
+                return None
+            zone = declared
+            value = value[:local_zone.start()].strip()
+            if not locale.country:
+                country = next((c for c, tz in _COUNTRY_ZONES.items() if tz == declared), None)
+                locale = locale.model_copy(update={"country": country})
         # Charité and similar German listings write local times as "10:00h".
-        value = re.sub(r"(\b\d{1,2}:\d{2})h\b", r"\1", value, flags=re.I)
+        value = re.sub(r"(\b\d{1,2}:\d{2})\s*(?:h|Uhr)\b", r"\1", value, flags=re.I)
     if not value or not _CLOCK.search(value):
         return None
     parsed = _parse_date(value, locale)
     if parsed is None or parsed.tzinfo is not None:
         return parsed
-    zone = locale.tz or _COUNTRY_ZONES.get((locale.country or "").upper())
+    if not zone:
+        region = (locale.lang or "").replace("_", "-").partition("-")[2].upper()
+        zone = _COUNTRY_ZONES.get(region)
     if not zone:
         return None
     try:
@@ -180,6 +202,10 @@ def _deadline(value: str | None, locale: Locale) -> datetime | None:
     if localized.utcoffset() != localized.replace(fold=1).utcoffset():
         return None  # A DST transition leaves the wall time missing or ambiguous.
     return localized
+
+
+def shows_deadline_time(raw: RawTender) -> bool:
+    return bool(_CLOCK.search(_single_text(raw.fields.get("submissionDeadline")) or ""))
 
 
 def _performance_place(fields: dict[str, str | list[str] | None]) -> PlaceOfPerformance | None:

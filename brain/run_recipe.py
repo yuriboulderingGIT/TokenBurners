@@ -20,6 +20,7 @@ from app.models import RawTender, Recipe
 from brain import berlin_documents, charite_documents
 from brain.blocks import Blocked, detect_block
 from brain.notice_evidence import json_collection_kinds, non_notice_target, rejection_reason
+from brain.notice_fields import fill_notice_fields, listed_deadline_column, notice_facts
 from brain.normalize import _single_text
 from brain.shrink import shrink
 
@@ -202,6 +203,9 @@ async def run_recipe(
             following = page_url if search_pages.more(entries, observed_count) else None
         elif isinstance(page, html.HtmlElement) and _declared_last_page(nav_page, current_url):
             following = None
+        elif isinstance(page, html.HtmlElement) and (pager := _numbered_pager(nav_page, current_url)) is not None:
+            position, links = pager
+            following = links.get(position + 1)
         else:
             try:
                 advertised, get_forms = _advertised_pagination(nav_page, current_url)
@@ -235,6 +239,7 @@ async def run_recipe(
             return []
 
         collections = json_collection_kinds(page, entries) if recipe.kind == "json_api" else {}
+        deadline_columns = {}
         for entry in entries:
             sampling_done = max_tenders is not None and sampled >= max_tenders
             if sampling_done and not verify_all_pages:
@@ -270,6 +275,12 @@ async def run_recipe(
                 detail_url = tender_url
                 source = _parse_page(detail_response, recipe.kind)
                 source_base = document_base(source, tender_url)
+                if isinstance(source, html.HtmlElement) and (target := full_notice_url(source, source_base, origin)):
+                    _check_block(detail_response)
+                    detail_response = await fetch_page(fetch, target, origin)
+                    source = _parse_page(detail_response, "html")
+                    tender_url = detail_url = str(detail_response.url)
+                    source_base = document_base(source, tender_url)
             elif not sampling_done:
                 sampled += 1
 
@@ -277,6 +288,21 @@ async def run_recipe(
                 name: _field_value(selector(source))
                 for name, selector in fields.items()
             }
+            if detail_url and isinstance(source, html.HtmlElement):
+                fill_notice_fields(values, notice_facts(source))
+                title = _single_text(values.get("title"))
+                if title and ":" in title and isinstance(entry, html.HtmlElement):
+                    suffix = title.partition(":")[2].strip()
+                    if any(" ".join(a.text_content().split()) == suffix for a in entry.xpath(".//a[@href]")):
+                        values["title"] = suffix
+            if isinstance(entry, html.HtmlElement) and entry.tag == "tr" and not values.get("submissionDeadline"):
+                table = next(entry.iterancestors("table"), None)
+                if table not in deadline_columns:
+                    deadline_columns[table] = listed_deadline_column(entry)
+                index = deadline_columns[table]
+                cells = entry.xpath("./td")
+                if index is not None and index < len(cells) and not entry.xpath("./td[@rowspan or @colspan]"):
+                    values["submissionDeadline"] = " ".join(cells[index].text_content().split()) or None
             if identifier := _single_text(values.get("id")):
                 identities.add(identifier)
             else:
@@ -382,7 +408,12 @@ async def run_recipe(
             # A tender's own page is not one of its documents (tenderned.nl: a recipe mapped both to the
             # notice link, and every read would "download" thousands of web pages as failed files).
             document_urls = [url for url in dict.fromkeys(document_urls) if url != tender_url]
+            if (not document_urls and isinstance(source, html.HtmlElement)
+                    and next(_document_controls(source), None) is not None):
+                raise RecipeReadError("the notice shows a document download button, but no public file link was found")
             tenders.append(RawTender(url=tender_url, detail_url=detail_url, fields=values,
+                                     source_language=(source.getroottree().getroot().get("lang")
+                                                      if isinstance(source, html.HtmlElement) else None),
                                      document_links=document_urls))
         if following is None or (not verify_all_pages and max_tenders == sampled):
             break
@@ -411,6 +442,38 @@ async def run_recipe(
     return tenders
 
 
+def full_notice_url(source: html.HtmlElement, base_url: str, origin: Origin) -> str | None:
+    """One explicitly labelled continuation from a summary to the full public notice."""
+    targets = set()
+    for anchor in source.xpath("//a[@href and not(@download) and not(ancestor::nav or ancestor::footer or ancestor::aside)]"):
+        label = " ".join(anchor.text_content().casefold().split())
+        if not re.fullmatch(
+            r"(?:auf der |zur |zum |view (?:the )?|open (?:the )?|go to (?:the )?)?"
+            r"(?:verfahrensseite|vollständige bekanntmachung|full (?:contract |tender )?notice|"
+            r"tender details|complete notice|avis complet|volledige aankondiging)", label
+        ):
+            continue
+        target = resolve_portal_url(base_url, anchor.get("href"), origin)
+        if target and target != base_url:
+            targets.add(target)
+    return targets.pop() if len(targets) == 1 else None
+
+
+def _document_controls(source: html.HtmlElement) -> Iterator[html.HtmlElement]:
+    """Visible, actionable controls that explicitly offer the notice's documents."""
+    for node in source.xpath(
+        "descendant-or-self::*[self::button or self::a or @role='button' or self::input[@type='button']]"
+        "[not(ancestor-or-self::nav or ancestor-or-self::footer or ancestor-or-self::aside "
+        "or ancestor-or-self::*[@hidden or @aria-hidden='true' or @disabled or @aria-disabled='true' or @role='navigation'])]"
+    ):
+        label = " ".join(" ".join((node.text_content(), node.get("aria-label", ""), node.get("title", ""),
+                                   node.get("value", ""))).casefold().split())
+        if re.search(r"\b(?:download (?:the |all )?(?:(?:tender|procurement|contract) )?(?:documents?|attachments?)"
+                     r"|(?:vergabeunterlagen|ausschreibungsunterlagen) herunterladen"
+                     r"|télécharger (?:les |le )?(?:documents|dossier))\b", label):
+            yield node
+
+
 def _attachment_links(source: html.HtmlElement, base_url: str) -> list[str]:
     """Recover file links with positive evidence on the selected row or notice."""
     links = []
@@ -428,6 +491,11 @@ def _attachment_links(source: html.HtmlElement, base_url: str) -> list[str]:
             or _FILE_SUFFIX.search(urlsplit(url).path)
             or any(_FILE_LABEL.search(" ".join(label.split())) for label in labels)
         ):
+            links.append(url)
+    for control in _document_controls(source):
+        target = control.get("data-download-url") or control.get("data-href") or control.get("href")
+        if (target and not target.strip().startswith("#")
+                and (url := resolve_portal_url(base_url, target, portal_origin(base_url))) and url != base_url):
             links.append(url)
     return links
 
@@ -603,6 +671,67 @@ def _advertised_pagination(page: Any, base_url: str) -> tuple[set[str], set[str]
     if isinstance(page, html.HtmlElement) and links and not urls and not _last_numbered_page(page, base_url):
         raise NoPublicNextLink("the next page control provides no public HTTP link")
     return urls, form_urls
+
+
+def _numbered_pager(page: html.HtmlElement, base_url: str) -> tuple[int, dict[int, str]] | None:
+    """Recognize an observed sequence on this listing, with exactly the same search filters."""
+    base = urlsplit(base_url)
+    current = parse_qs(base.query, keep_blank_values=True)
+    groups: dict[str, dict[int, tuple[int, str]]] = {}
+    for anchor in page.xpath("//a[@href]"):
+        label = anchor.text_content().strip()
+        if not re.fullmatch(r"[1-9]\d{0,7}", label) or _is_disabled(anchor):
+            continue
+        url = resolve_portal_url(base_url, anchor.get("href"), portal_origin(base_url))
+        if not url or urlsplit(url).path != base.path:
+            continue
+        query = parse_qs(urlsplit(url).query, keep_blank_values=True)
+        for key, values in query.items():
+            if key.casefold() not in _PAGE_QUERY_KEYS or len(values) != 1 or not re.fullmatch(r"\d{1,10}", values[0]):
+                continue
+            if {k: v for k, v in query.items() if k != key} != {k: v for k, v in current.items() if k != key}:
+                continue
+            group = groups.setdefault(key, {})
+            candidate = (int(values[0]), url)
+            if group.setdefault(int(label), candidate) != candidate:
+                return None
+    for key, group in groups.items():
+        if len(group) < 2:
+            number, (value, url) = next(iter(group.items()))
+            # A two-page pager often renders the current page as plain text and only links page 2.
+            # Require a marked current page alongside the link before treating it as a sequence.
+            pagers = page.xpath("//nav[.//*[@aria-current='page']] | //*[@role='navigation'][.//*[@aria-current='page']]"
+                                " | //*[*[@aria-current='page'] and a[@href]]")
+            for container in pagers:
+                active = {" ".join(node.text_content().split()) for node in container.xpath(".//*[@aria-current='page']")}
+                if (key.casefold() not in _OFFSET_QUERY_KEYS and number == value and active == {str(number - 1)}
+                        and current.get(key, ["1"]) == [str(number - 1)]
+                        and any(resolve_portal_url(base_url, href, portal_origin(base_url)) == url
+                                for href in container.xpath(".//a/@href"))):
+                    return number - 1, {number: url}
+            continue
+        pages = sorted(group)
+        low, high = pages[0], pages[-1]
+        start = group[low][0]
+        step, remainder = divmod(group[high][0] - start, high - low)
+        if remainder or step <= 0 or any(val != start + (n - low) * step for n, (val, _) in group.items()):
+            continue
+        first = start - (low - 1) * step
+        if first not in (0, 1):
+            continue
+        value = current.get(key, [str(first)])
+        if len(value) != 1 or not re.fullmatch(r"\d{1,10}", value[0]):
+            continue
+        position, remainder = divmod(int(value[0]) - first, step)
+        position += 1
+        if remainder or position < 1:
+            continue
+        if position < high and position + 1 not in group:
+            raise PaginationError(f"the numbered pager advertises page {high} but has no link to page {position + 1}")
+        if position >= high and next_page_controls(page, base_url):
+            continue  # a forward control can extend beyond the visible numbers
+        return position, {n: url for n, (_, url) in group.items()}
+    return None
 
 
 def _get_pager_url(button: html.HtmlElement, base_url: str) -> str | None:

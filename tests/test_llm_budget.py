@@ -36,6 +36,25 @@ def test_json_mode_marks_input_even_when_the_portal_evidence_does_not(tmp_path):
     assert asyncio.run(client.json('{"entry": "Public notices"}')) == {"ok": True}
 
 
+def test_recovery_bypasses_cached_initial_answers(tmp_path):
+    calls = []
+
+    async def create(**request):
+        calls.append(request)
+        return response(10, json.dumps({"answer": len(calls)}))
+
+    async def exercise():
+        db = DB(tmp_path / "budget.sqlite")
+        llm = scoped(db, create, budget=1, cache=tmp_path / "cache").llm
+        for purpose, expected in (("attach", 1), ("attach", 1), ("repair", 2), ("reattach", 3)):
+            assert await llm.scoped("p", "r", purpose).json("same prompt") == {"answer": expected}
+        assert [r["purpose"] for r in db.all("SELECT purpose FROM llm_calls ORDER BY rowid")] == [
+            "attach", "repair", "attach",
+        ]
+
+    asyncio.run(exercise())
+
+
 def test_truncated_response_reports_the_cause_and_records_usage(tmp_path):
     async def create(**request):
         partial = response(request["max_output_tokens"], "")
@@ -144,3 +163,15 @@ def test_unpriced_model_is_rejected_before_dispatch(tmp_path):
     with pytest.raises(LLMUnavailable, match="no budget pricing"):
         asyncio.run(client.json("test"))
     assert not db.all("SELECT * FROM llm_reservations")
+
+
+def test_run_shows_confirmed_spend_while_running_and_after_failure(tmp_path):
+    db = DB(tmp_path / "watchtower.db")
+    portal = db.portal_create("https://buyer.example/list")
+    run = db.run_create(portal, "repair")
+    db.llm_log(portal, run, "gpt-5-mini", 300, 200, 0.001, "repair")
+    [active] = db.runs_for(portal)
+    assert active["model_cost_usd"] == 0.001 and active["result"] is None
+    db.run_finish(run, "failed", cost_usd=0.001)
+    [finished] = db.runs_for(portal)
+    assert finished["model_cost_usd"] == 0.001

@@ -19,7 +19,7 @@ from brain.llm import ScopedLLM
 from brain.normalize import _single_text
 from brain.public_search import api_subdomain
 from brain.run_recipe import (
-    Origin, PaginationError, RecipeReadError, _field_value, _navigation_url, _observed_href, _selector,
+    Origin, PageLimitExceeded, PaginationError, RecipeReadError, _field_value, _navigation_url, _observed_href, _selector,
     document_base, fetch_page, is_json_response, portal_origin,
 )
 
@@ -146,6 +146,7 @@ async def repair(
             return None
 
     feedback = list(health.problems)
+    rejected = set()
     for _ in range(MAX_TRIES):
         try:
             if html_listing is not None:
@@ -162,8 +163,7 @@ async def repair(
                 entry_response=json_entry,
             )
             if candidate is None:
-                feedback.append("the public JSON list could not be rediscovered")
-                continue
+                raise RecipeValidationError("the public JSON list could not be rediscovered")
             feed_origin = portal_origin(candidate.list_.url)
             page_origin = portal_origin(discovery_url)
             if feed_origin != page_origin and not api_subdomain(page_origin, feed_origin):
@@ -173,7 +173,11 @@ async def repair(
             )
             return candidate
         except (RecipeReadError, RecipeValidationError, httpx.HTTPError, json.JSONDecodeError) as exc:
-            feedback.append(str(exc))
+            message = str(exc)
+            if message in rejected or isinstance(exc, PageLimitExceeded):
+                break
+            rejected.add(message)
+            feedback.append(message)
             if isinstance(exc, PaginationError) and exc.page_sample:
                 pagination_page = exc.page_sample
     return None

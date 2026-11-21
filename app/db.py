@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at TEXT,
     result TEXT,                       -- ok | failed | NULL while running
     notes TEXT NOT NULL DEFAULT '',
+    request_count INTEGER,
     model_cost_usd REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS runs_by_portal ON runs (portal_id, started_at);
@@ -166,7 +167,26 @@ class DB:
         portal_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(portals)")}
         if "monitoring_scope" not in portal_columns:
             self._conn.execute("ALTER TABLE portals ADD COLUMN monitoring_scope TEXT")
+        if "request_count" not in {row["name"] for row in self._conn.execute("PRAGMA table_info(runs)")}:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN request_count INTEGER")
         self._quarantine_legacy_categories()
+        self._quarantine_unverified_reads()
+
+    def _quarantine_unverified_reads(self) -> None:
+        """Older versions published first-read rows before checking document coverage."""
+        with self.transaction() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS unverified_tenders AS SELECT * FROM tenders WHERE 0")
+            portals = conn.execute(
+                "SELECT id FROM portals WHERE last_success_at IS NULL AND tender_count > 0 "
+                "AND EXISTS (SELECT 1 FROM runs WHERE portal_id=portals.id AND result='failed' "
+                "AND instr(notes,'read ok, but no tender documents were found') > 0)"
+            ).fetchall()
+            for portal in portals:
+                key = (portal["id"],)
+                conn.execute("INSERT INTO unverified_tenders SELECT * FROM tenders WHERE portal_id=?", key)
+                conn.execute("DELETE FROM tenders WHERE portal_id=?", key)
+                conn.execute("UPDATE portals SET tender_count=0, reason=CASE WHEN reason LIKE 'no documents:%' "
+                             "THEN 'Document delivery was never verified' ELSE reason END WHERE id=?", key)
 
     def _quarantine_legacy_categories(self) -> None:
         """Archive the false category rows identified in the November 2026 review."""
@@ -277,7 +297,7 @@ class DB:
     def run_create(self, portal_id: str, kind: str) -> str:
         run_id = new_id()
         self.execute(
-            "INSERT INTO runs (id, portal_id, kind, started_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO runs (id, portal_id, kind, started_at, request_count) VALUES (?, ?, ?, ?, 0)",
             (run_id, portal_id, kind, now_iso()),
         )
         return run_id
@@ -293,8 +313,9 @@ class DB:
         if note:
             self.run_note(run_id, note)
         self.execute(
-            "UPDATE runs SET finished_at = ?, result = ?, model_cost_usd = model_cost_usd + ? WHERE id = ?",
-            (now_iso(), result, cost_usd, run_id),
+            "UPDATE runs SET finished_at = ?, result = ?, model_cost_usd = COALESCE("
+            "(SELECT SUM(cost_usd) FROM llm_calls WHERE run_id = ?), model_cost_usd + ?) WHERE id = ?",
+            (now_iso(), result, run_id, cost_usd, run_id),
         )
 
     def runs_close_orphans(self) -> None:
@@ -547,6 +568,8 @@ class DB:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (portal_id, run_id, model, tokens_in, tokens_out, cost_usd, purpose, now_iso()),
             )
+            if run_id is not None:
+                conn.execute("UPDATE runs SET model_cost_usd=model_cost_usd+? WHERE id=?", (cost_usd, run_id))
             if reservation is not None:
                 conn.execute("DELETE FROM llm_reservations WHERE id = ?", (reservation,))
 

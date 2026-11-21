@@ -41,7 +41,7 @@ from brain.blocks import Blocked
 from brain.learn import AttachFailed, StoredTenderIds, TemporaryAttachFailure, learn_recipe, validate_candidate
 from brain.lifecycle import recheck_missing
 from brain.llm import LLM, BudgetExceeded, LLMUnavailable
-from brain.normalize import _single_text, normalize
+from brain.normalize import _single_text, normalize, shows_deadline_time
 from brain.repair import repair
 from brain.scope import is_results_window, monitoring_scope, preserves_scope, scope_known
 from brain.run_recipe import PageLimitExceeded, PaginationError, RecipeReadError, run_recipe
@@ -72,9 +72,15 @@ class Worker:
         self.queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self.active: dict[str, str] = {}  # portal_id -> run_id of the queued or running read
         self._tasks: list[asyncio.Task] = []
+        if self.fetcher is not None:
+            self.fetcher.on_request = self._record_request
         self._queued_actions: dict[str, str] = {}  # consumed at start; an in-flight request keeps its run id
 
     # ----- control -----
+
+    def _record_request(self, portal_id: str) -> None:
+        if run_id := self.active.get(portal_id):
+            self.db.execute("UPDATE runs SET request_count=request_count+1 WHERE id=?", (run_id,))
 
     async def start(self) -> None:
         for _ in range(WORKER_CONCURRENCY):
@@ -203,7 +209,7 @@ class Worker:
                 if retry:
                     states.set_state(self.db, portal_id, states.INTEGRATING, "retrying attach: locating the tender listing", run_id)
                 self.db.run_note(run_id, "attach: no recipe yet, asking the model to learn one")
-                llm = self.llm.scoped(portal_id, run_id, "attach")
+                llm = self.llm.scoped(portal_id, run_id, "reattach" if retry else "attach")
                 recipe = await learn_recipe(portal["url"], fetch, llm)
                 cost += llm.total_cost
                 version = self.db.recipe_save(portal_id, recipe, "attach", llm.total_cost)
@@ -226,6 +232,14 @@ class Worker:
                 health = check_health(self._previous(portal_id), result)
                 self.db.run_note(run_id, f"read {result.raw_count} list entries, {len(result.tenders)} tenders")
                 if health.ok:
+                    files = sum(len(tender.documents) for tender in result.tenders)
+                    if (result.tenders and not files and not result.tender_ids_with_document_links
+                            and _documents_unverified(recipe, result.tenders)):
+                        reason = (f"no documents: found {len(result.tenders)} tender(s), but could not verify "
+                                  "their documents. This read was not published")
+                        states.set_state(self.db, portal_id, states.FAILED, reason, run_id)
+                        self.db.run_finish(run_id, "failed", reason, cost)
+                        return False
                     listed = {tender.id for tender in result.tenders}
                     rechecks = await recheck_missing(self.db, portal_id, recipe, listed, fetch)
                     scope = monitoring_scope(portal["url"], recipe)
@@ -238,20 +252,6 @@ class Worker:
                         detail_urls=result.detail_urls, source_statuses=result.source_statuses,
                         repaired_recipe=repaired_recipe, repair_cost_usd=repair_cost_usd,
                     )
-                    files = sum(len(tender.documents) for tender in result.tenders)
-                    no_links = bool(result.tenders) and not files and not result.tender_ids_with_document_links
-                    if no_links and _documents_unverified(recipe, result.tenders):
-                        # The read never opened the pages where documents usually are, so "no files"
-                        # is not established. Say so; the tenders stay available. No repair: a timed
-                        # plain read checks again for free.
-                        reason = (
-                            f"no documents: {count} tenders delivered, but their documents were not found. "
-                            "They may sit on tender pages the recipe does not open, behind a login, "
-                            "or on another website"
-                        )
-                        states.set_state(self.db, portal_id, states.FAILED, reason, run_id)
-                        self.db.run_finish(run_id, "failed", "read ok, but no tender documents were found", cost)
-                        return False
                     reason = f"delivering {count} tenders"
                     if files:
                         file_label = "document" if files == 1 else "documents"
@@ -345,6 +345,7 @@ class Worker:
             raise Blocked(block_kind or "login", "the tender documents can't be downloaded without it")
         return ReadResult(
             tenders=tenders, raw_count=len(raws), documents_tried=tried, documents_failed=failed,
+            deadline_times_seen=sum(shows_deadline_time(raw) for raw in raws),
             documents_kept=failed_revalidations,
             tender_ids_with_document_links=tender_ids_with_document_links,
             detail_urls=detail_urls, source_statuses=source_statuses,

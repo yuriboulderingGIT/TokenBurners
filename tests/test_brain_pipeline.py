@@ -228,7 +228,7 @@ def test_changed_second_page_preserves_last_good_tenders(tmp_path, monkeypatch, 
                                 lambda page, layout: render_list(page, "v2" if page == 2 else layout))
             worker.request_read(portal_id)
             await asyncio.wait_for(worker.queue.join(), timeout=5)
-            assert len(attempts) == (2 if can_repair else 3)
+            assert len(attempts) == 2
             repairs = [r for r in db.runs_for(portal_id) if r["kind"] == "repair"]
             assert len(repairs) == 1
             assert repairs[0]["result"] == ("ok" if can_repair else "failed")

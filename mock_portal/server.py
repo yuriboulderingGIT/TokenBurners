@@ -85,7 +85,8 @@ def _state(key: str) -> str | bool:
 
 
 def _page(title: str, body: str) -> str:
-    return f'<!doctype html><html><head><meta charset="utf-8"><title>{title}</title></head><body>{body}</body></html>'
+    return (f'<!doctype html><html lang="en-IE"><head><meta charset="utf-8"><title>{title}</title></head>'
+            f'<body>{body}<footer>Submission deadlines are local time in Europe/Dublin.</footer></body></html>')
 
 
 def _chunk(page: int) -> tuple[list[dict], bool]:

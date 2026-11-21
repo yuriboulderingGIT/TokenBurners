@@ -130,7 +130,7 @@ def test_document_selector_change_preserves_files_during_repair(portal, monkeypa
         assert db.portal_get(portal_id)["state"] == "serving"
         assert repair_run["result"] == "ok"
     else:
-        assert len(model.requests) == 3
+        assert len(model.requests) == 2  # the same rejected repair twice exhausts the retry
         assert db.portal_get(portal_id)["state"] == "failed"
         assert repair_run["result"] == "failed"
         assert db.recipe_latest(portal_id).version == previous.version

@@ -114,6 +114,17 @@ def test_browser_control(browser_fixture):
     assert captured, requests
 
 
+def test_tracker_scripts_do_not_consume_listing_requests(browser_fixture):
+    captured, requests = capture("""
+        for (const url of ['https://www.googletagmanager.com/gtm.js', '/matomo.js']) {
+            const s = document.createElement('script'); s.src = url; document.head.appendChild(s);
+        }
+        fetch('/api/tenders');
+    """)
+    assert captured
+    assert all("gtm.js" not in url and "matomo.js" not in url for url in requests)
+
+
 def test_browser_session_cookie(browser_fixture):
     captured, requests = capture("if(document.cookie.includes('session=anonymous')) fetch('/api/tenders');",
         headers={'set-cookie': 'session=anonymous; Path=/; Secure'})
@@ -151,6 +162,16 @@ def test_browser_cdn_module(browser_fixture):
         return httpx.Response(200, json={'tenders': [{'id': '1', 'title': 'Roof'}]})
     captured, requests = capture("import('https://cdn.example/app.js')", respond)
     assert captured, requests
+
+
+def test_widget_redirect_to_tracker_is_not_fetched(browser_fixture):
+    def respond(request):
+        if request.url.host == "cdn.example":
+            return httpx.Response(302, headers={"Location": "https://tracker.clarity.ms/collect.js"})
+        return httpx.Response(200, json={"tenders": [{"id": "1", "title": "Roof"}]})
+    captured, requests = capture("import('https://cdn.example/app.js').catch(() => fetch('/api/tenders'))", respond)
+    assert captured and "https://cdn.example/app.js" in requests
+    assert all("clarity.ms" not in url for url in requests)
 
 
 def test_base_url_applies_to_pagination():
