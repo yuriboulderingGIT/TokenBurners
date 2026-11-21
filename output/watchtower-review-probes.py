@@ -1,7 +1,5 @@
-"""Offline diagnostics for the 2026-11-21 review, not desired-behavior regression tests.
+"""Offline review probes. P1 checks assert the corrected behavior; P2 probes retain the historical baseline.
 
-Twelve tests PASS when a documented limitation is reproduced. The API-subdomain
-repair test checks the fix merged in 84f807f after the original a890ad9 review.
 No public HTTP requests or model calls. Run explicitly with pytest.
 """
 import asyncio
@@ -23,7 +21,7 @@ from app.models import Health, Locale, RawTender, ReadResult, Recipe, SearchTran
 from app.worker import Worker
 from brain.learn import validate_candidate
 from brain.normalize import normalize
-from brain.public_search import ObservedSearch, PublicVisit, SearchPages
+from brain.public_search import ObservedSearch, PublicVisit, SearchPages, operation_id
 from brain.repair import repair
 from brain.run_recipe import RecipeReadError, run_recipe
 import pytest
@@ -37,7 +35,7 @@ def tender(n, **fields):
     }), Locale())
 
 
-def test_category_directory_passes_attach_and_health():
+def test_category_directory_cannot_attach_or_publish():
     async def exercise():
         markup = '<main>' + ''.join(
             f'<article data-id="{i}"><a href="/categoryOverview.do?code={i}">Category {i}</a></article>'
@@ -47,11 +45,10 @@ def test_category_directory_passes_attach_and_health():
         recipe = Recipe.model_validate({'list': {'url': BASE, 'item': '//article'},
                                         'fields': {'id': '@data-id', 'title': './a'}})
         try:
-            await validate_candidate(recipe, fetcher.for_portal('test'))
-            raws = await run_recipe(recipe, fetcher.for_portal('test'))
-            result = ReadResult(tenders=[normalize(r, recipe.locale) for r in raws], raw_count=5)
-            assert check_health(None, result).ok
-            assert all('categoryOverview' in t.url for t in result.tenders)
+            with pytest.raises(RecipeReadError, match='notice'):
+                await validate_candidate(recipe, fetcher.for_portal('test'))
+            with pytest.raises(RecipeReadError, match='notice'):
+                await run_recipe(recipe, fetcher.for_portal('test'))
         finally:
             await fetcher.aclose()
     asyncio.run(exercise())
@@ -61,25 +58,39 @@ def test_valid_empty_collection_is_always_unhealthy():
     assert not check_health(None, ReadResult(tenders=[], raw_count=0)).ok
 
 
-def test_missing_minority_is_closed_without_closure_evidence(tmp_path):
+def test_missing_minority_is_closed_and_its_absence_recorded(tmp_path):
+    # The brief: "closed once ... the portal no longer lists the tender". The absence is recorded.
     before = ReadResult(tenders=[tender(i) for i in range(4)], raw_count=4)
     after = ReadResult(tenders=before.tenders[:3], raw_count=3)
     assert check_health(before, after).ok
-    db = DB(tmp_path / 'missing.db')
+    db = DB(tmp_path / 'closure.db')
     portal = db.portal_create(BASE)
     db.save_tenders(portal, before.tenders)
     db.save_tenders(portal, after.tenders)
     missing = next(t for t in db.tenders_for(portal) if t['id'] == '3')
     assert missing['status'] == 'closed'
+    assert db.one('SELECT missing_since FROM tenders WHERE portal_id = ? AND id = ?', (portal, '3'))['missing_since']
 
+
+def test_latest_window_keeps_a_missing_notice_open(tmp_path):
+    # A latest-results window drops notices that are still open: absence alone does not close them.
+    before = [tender(i) for i in range(4)]
+    db = DB(tmp_path / 'window.db')
+    portal = db.portal_create(BASE)
+    db.save_tenders(portal, before, results_window=True)
+    db.save_tenders(portal, before[:3], results_window=True)
+    missing = next(t for t in db.tenders_for(portal) if t['id'] == '3')
+    assert missing['status'] == 'open'
+    assert db.one('SELECT missing_since FROM tenders WHERE portal_id = ? AND id = ?', (portal, '3'))['missing_since']
 
 def test_twenty_percent_unreadable_ids_can_pass_health():
     assert check_health(None, ReadResult(tenders=[tender(i) for i in range(4)], raw_count=5)).ok
 
 
-def test_same_document_url_never_revalidated(tmp_path, monkeypatch):
+def test_same_document_url_detects_new_revision(tmp_path, monkeypatch):
     async def exercise():
         monkeypatch.setattr('app.documents.FILES_DIR', tmp_path / 'files')
+        monkeypatch.setattr('app.documents.UNVALIDATED_REFRESH_SECONDS', 0)
         db = DB(tmp_path / 'docs.db')
         portal = db.portal_create(BASE)
         calls = []
@@ -90,8 +101,8 @@ def test_same_document_url_never_revalidated(tmp_path, monkeypatch):
         try:
             first = await store_documents(db, portal, tender(1), [BASE + '/spec.pdf'], fetcher.for_portal(portal))
             second = await store_documents(db, portal, tender(1), [BASE + '/spec.pdf'], fetcher.for_portal(portal))
-            assert len(calls) == 1
-            assert first.documents[0].sha256 == second.documents[0].sha256
+            assert len(calls) == 2
+            assert first.documents[0].sha256 != second.documents[0].sha256
         finally:
             await fetcher.aclose()
     asyncio.run(exercise())
@@ -120,7 +131,7 @@ def test_api_subdomain_recipe_can_repair_after_upstream_fix(monkeypatch):
     asyncio.run(exercise())
 
 
-def test_manual_failed_refresh_disables_repair(tmp_path):
+def test_manual_failed_refresh_allows_repair(tmp_path):
     async def exercise():
         db = DB(tmp_path / 'repair.db')
         portal = db.portal_create(BASE)
@@ -134,8 +145,9 @@ def test_manual_failed_refresh_disables_repair(tmp_path):
             observed.append(kwargs)
         worker._read = read
         try:
-            await worker._handle(portal, db.run_create(portal, 'read'))
-            assert observed[0]['allow_repair'] is False
+            worker.request_read(portal, action='refresh')
+            await worker._handle(*worker.queue.get_nowait())
+            assert observed[0]['allow_repair'] is True
         finally:
             await fetcher.aclose()
     asyncio.run(exercise())
@@ -159,7 +171,7 @@ def test_public_post_offset_is_reset_to_zero():
     asyncio.run(exercise())
 
 
-def test_overlap_counts_as_complete_but_omits_one_notice():
+def test_overlap_cannot_claim_complete_coverage():
     async def exercise():
         def payload(ids):
             return json.dumps({'total': 20, 'items': [{'id': str(i), 'title': f'Notice {i}'} for i in ids]})
@@ -169,16 +181,14 @@ def test_overlap_counts_as_complete_but_omits_one_notice():
             'list': {'url': BASE + '/api?offset=0', 'item': '$.items[*]'},
             'fields': {'id': '$.id', 'title': '$.title'}})
         try:
-            raws = await run_recipe(recipe, fetcher.for_portal('test'))
-            rows = [normalize(r, recipe.locale) for r in raws]
-            assert len(rows) == 20 and len({t.id for t in rows}) == 19
-            assert check_health(None, ReadResult(tenders=rows, raw_count=20)).ok
+            with pytest.raises(RecipeReadError, match='19 distinct'):
+                await run_recipe(recipe, fetcher.for_portal('test'))
         finally:
             await fetcher.aclose()
     asyncio.run(exercise())
 
 
-def test_graphql_operations_on_same_endpoint_are_not_distinguished(monkeypatch):
+def test_graphql_reselects_the_intended_operation(monkeypatch):
     async def exercise():
         spec = SearchTransport(endpoint=BASE + '/graphql', media_type='application/json')
         unrelated = ObservedSearch(spec, {'query': 'query { categories { id title } }'}, None)
@@ -187,8 +197,11 @@ def test_graphql_operations_on_same_endpoint_are_not_distinguished(monkeypatch):
         async def capture(*args, **kwargs):
             return [(unrelated, wrong_payload), (intended, {'tenders': [{'id': 'n1', 'title': 'Roof'}]})]
         monkeypatch.setattr('brain.js_discover._capture_json', capture)
-        pages = await SearchPages.open(BASE, spec, None)
-        assert pages.first_payload == wrong_payload
+        saved = spec.model_copy(update={'operation_id': operation_id(intended.params)})
+        pages = await SearchPages.open(BASE, saved, None)
+        assert pages.first_payload['tenders'][0]['id'] == 'n1'
+        with pytest.raises(RecipeReadError):
+            await SearchPages.open(BASE, spec, None)
     asyncio.run(exercise())
 
 

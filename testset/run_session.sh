@@ -23,7 +23,7 @@ docker run -d --name "$mock" --network "$network" --network-alias mock \
     -v "$root/mock_portal:/srv/mock_portal:ro" "$image" \
     uvicorn mock_portal.server:app --host 0.0.0.0 --port 8090 >/dev/null
 docker run -d --name "$api" --network "$network" -p "127.0.0.1:${WATCHTOWER_PORT:-18080}:8080" \
-    --env-file "$env_file" -e DATA_DIR=/data -e REFRESH_MINUTES=15 \
+    --env-file "$env_file" -e DATA_DIR=/data -e REFRESH_MINUTES=15 -e MOCK_PORTAL_ADDRESS=mock:8090 \
     -v "$data:/data" "$image" >/dev/null
 addr="http://$(docker port "$api" 8080/tcp)"
 for i in {1..45}; do

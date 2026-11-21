@@ -13,7 +13,7 @@ from app.worker import Worker
 from brain import js_discover
 from brain.learn import validate_candidate
 from brain.normalize import normalize
-from brain.run_recipe import run_recipe
+from brain.run_recipe import PaginationError, run_recipe
 from tests.test_js_discover import require_chromium
 
 BASE = 'https://portal.example'
@@ -52,20 +52,16 @@ def test_html_base_url():
     asyncio.run(exercise())
 
 
-def test_duplicate_after_first_three_rows(tmp_path):
+def test_duplicate_after_first_three_rows():
     async def exercise():
         records = [{'id': str(min(n, 9)), 'title': f'Contract {n}'} for n in range(1, 11)]
         client = FakeFetcher({BASE + '/api': json.dumps({'items': records, 'total': 10})})
         recipe = Recipe.model_validate({'kind': 'json_api', 'list': {'url': BASE + '/api', 'item': '$.items[*]'},
             'fields': {'id': '$.id', 'title': '$.title'}})
         try:
-            await validate_candidate(recipe, client.for_portal('test'))
-            rows = await run_recipe(recipe, client.for_portal('test'))
-            result = ReadResult(tenders=[normalize(row, recipe.locale) for row in rows], raw_count=len(rows))
-            db = DB(tmp_path / 'duplicate.db')
-            portal_id = db.portal_create(BASE + '/api')
-            count = db.save_tenders(portal_id, result.tenders)
-            assert not check_health(None, result).ok, f'10 rows pass attach and health, but only {count} stored'
+            for read in (validate_candidate, run_recipe):
+                with pytest.raises(PaginationError, match='9 distinct identities in 10 entries'):
+                    await read(recipe, client.for_portal('test'))
         finally:
             await client.aclose()
     asyncio.run(exercise())
@@ -224,7 +220,7 @@ def test_attach_run_first_read_reuses_validated_pages(tmp_path, monkeypatch):
         db = DB(tmp_path / 'attach.db')
         portal_id = db.portal_create(BASE + '/list')
         client = FakeFetcher({
-            BASE + '/list': '<html><body><article data-id="1"><h1>Roof</h1><a href="/roof.pdf">PDF</a></article></body></html>',
+            BASE + '/list': '<main aria-label="Notices"><article data-id="1"><h1>Roof</h1><a href="/roof.pdf">PDF</a></article></main>',
             BASE + '/roof.pdf': b'%PDF-1.4 roof',
         })
         recipe = Recipe.model_validate({'list': {'url': BASE + '/list', 'item': '//article'},

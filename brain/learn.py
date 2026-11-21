@@ -19,12 +19,13 @@ from brain.blocks import Blocked, detect_block
 from brain.llm import ScopedLLM
 from brain.normalize import normalize
 from brain.run_recipe import (
-    MAX_PAGES, MissedNextPage, NoPublicNextLink, Origin, PaginationError, RecipeReadError, advertised_next_urls,
+    MAX_PAGES, MissedNextPage, NoPublicNextLink, NotANotice, Origin, PaginationError, RecipeReadError, advertised_next_urls,
     _advertised_total_count, _attachment_links, canonical_origin, empty_search_url, fetch_page, is_json_response,
     next_page_controls,
     document_base, navigation_view, portal_origin, resolve_portal_url, run_recipe,
 )
 from brain.public_search import api_subdomain
+from brain.scope import heading_scope, navigation_preserves_scope
 from brain.shrink import shrink
 
 _SAMPLE_SIZE = 3
@@ -120,6 +121,14 @@ class PageSample:
     links: dict[str, str]
     document: html.HtmlElement | None = None
     requested_url: str | None = None
+    navigation_label: str = ""
+
+    def scope_label(self) -> str | None:
+        if self.document is not None:
+            headings = self.document.xpath("//main//h1 | //*[@role='main']//h1") or self.document.xpath("//h1")
+            if len(headings) == 1 and (scope := heading_scope(headings[0].text_content())):
+                return scope
+        return heading_scope(self.navigation_label) or None
 
     @cached_property
     def navigation(self) -> html.HtmlElement | None:
@@ -388,6 +397,11 @@ async def propose_html_recipe(
         raise RecipeValidationError("the proposal does not match the recipe schema") from exc
     if candidate.kind != "html" or candidate.list_.url != listing.url:
         raise RecipeValidationError("the recipe must use the supplied HTML list URL")
+    if candidate.list_.search:
+        raise RecipeValidationError("a public search must be captured from the listing")
+    candidate.list_.scope_label = listing.scope_label()
+    if previous and previous.list_.url == listing.url and not candidate.list_.scope_label:
+        candidate.list_.scope_label = previous.list_.scope_label
     # The model occasionally emits XPath 2.0 functions for optional metadata.
     # Drop only unsupported optional expressions; ID, title and navigation must validate.
     probe = listing.document
@@ -448,6 +462,7 @@ async def _learn_public_feed(listing: PageSample, fetch: PortalFetcher, llm: Sco
     feed, page = portal_origin(candidate.list_.url), portal_origin(listing.url)
     if feed != page and not api_subdomain(page, feed):
         raise RecipeValidationError("discovered JSON URL belongs to another portal")
+    candidate.list_.scope_label = listing.scope_label()
     await validate_candidate(candidate, fetch)
     return candidate
 
@@ -490,6 +505,8 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                     "Choose list_url from entry.links or the current URL, or use empty_search_url "
                     "when the public search form has no results yet. An overview showing a few of "
                     "many results is a preview: follow its link to the complete results. "
+                    "Keep the requested scope. Never choose a buyer, category, keyword, date range "
+                    "or narrower results window to make the listing easier to read. "
                     "If the link leads to another navigation page, return intermediate=true and "
                     "we will inspect it. Prefer public listings over search forms or sign-in pages. "
                     "Return detail_url only for an observed individual tender, otherwise null."
@@ -529,6 +546,15 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                     raise RecipeValidationError("listing URL was not observed on the portal")
             if target == listing.url:
                 break
+            target_label = listing.links.get(target, "")
+            has_notices = listing.document is not None and bool(listing.document.xpath(
+                "//tr[td[3]] | //li[@data-id] | //article[@data-id or .//a[@href]] | //*[@data-notice-id]"
+            ))
+            if not navigation_preserves_scope(listing.url, target, default_form=target == search_url,
+                                              has_notices=has_notices, link_label=target_label):
+                if has_notices:
+                    break  # read the requested listing rather than switch to other notices
+                raise RecipeValidationError("listing navigation changes the monitoring scope; supply the intended results URL")
             if target in visited:
                 raise RecipeValidationError("listing navigation returned to a previous page")
             target_origin = portal_origin(target)
@@ -536,6 +562,7 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                 raise RecipeValidationError("listing navigation left the portal")
             origin = target_origin
             listing = await read_page_sample(target, fetch, origin)
+            listing.navigation_label = target_label
             visited.add(listing.url)
             if discovery.get("intermediate") is not True:
                 break
@@ -601,9 +628,10 @@ async def learn_recipe(url: str, fetch: PortalFetcher, llm: ScopedLLM) -> Recipe
                 feedback.append(message)
             if isinstance(exc, PaginationError) and exc.page_sample:
                 pagination_page = exc.page_sample
-            if isinstance(exc, InvalidListingSample) and listing is entry and not strong:
+            if isinstance(exc, (InvalidListingSample, NotANotice)) and listing is entry and not strong:
                 targets = [url for url, label in entry.links.items()
-                           if url != entry.url and label.casefold() in _ALL_LISTINGS_LABELS]
+                           if url != entry.url and label.casefold() in _ALL_LISTINGS_LABELS
+                           and navigation_preserves_scope(entry.url, url)]
                 if len(targets) == 1:
                     try:
                         listing = await read_page_sample(targets[0], fetch, origin)

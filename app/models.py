@@ -107,10 +107,16 @@ class SearchTransport(BaseModel):
     page_path: list[str] | None = None  # JSON keys leading to the object that holds page_field
     html_path: list[str] | None = None
     total_path: list[str] | None = None
+    operation_id: str | None = None  # digest of the observed read operation, excluding session data
+    selection_id: str | None = None  # public filters/sort, independent of operation and response projection
+    scope: str | None = None  # public search constraints observed in the request
+    result_item: str | None = None
+    record_fields: dict[str, str] = Field(default_factory=dict)
 
 
 class ListSpec(BaseModel):
     url: str
+    scope_label: str | None = None  # derived from the source's listing heading or navigation label
     item: str  # XPath (html) or JSON path (json_api) selecting one list entry
     next_page: str | None = None
     max_pages: int = 20
@@ -158,6 +164,7 @@ class RawTender(BaseModel):
     """One tender as the recipe executor found it: raw strings, not cleaned yet."""
 
     url: str  # detail page URL (absolute)
+    detail_url: str | None = None  # actual fetched detail, independent of a display URL override
     fields: dict[str, str | list[str] | None] = Field(default_factory=dict)
     document_links: list[str] = Field(default_factory=list)  # absolute URLs
 
@@ -167,7 +174,10 @@ class ReadResult(BaseModel):
     raw_count: int = 0  # how many list entries the recipe found
     documents_tried: int = 0
     documents_failed: int = 0
+    documents_kept: int = 0  # known files whose check failed; their last verified revision is served
     tender_ids_with_document_links: set[str] | None = None  # observed before downloading or size checks
+    detail_urls: dict[str, str] = Field(default_factory=dict)
+    source_statuses: dict[str, str] = Field(default_factory=dict)
 
 
 class Health(BaseModel):

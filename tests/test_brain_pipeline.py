@@ -47,7 +47,9 @@ def test_worker_serves_four_remaining_mock_tenders(tmp_path, monkeypatch, caplog
                 assert len(db.tenders_listed_last(portal_id)) == expected
                 missing.add("/tender/MOCK-001")
             by_id = {row["id"]: row for row in db.tenders_for(portal_id)}
-            assert by_id["MOCK-001"]["status"] == "closed"
+            assert by_id["MOCK-001"]["status"] == "closed"  # the brief: no longer listed means closed
+            assert db.one("SELECT missing_since FROM tenders WHERE portal_id = ? AND id = 'MOCK-001'",
+                          (portal_id,))["missing_since"]
             assert all(row["kind"] == "read" for row in db.runs_for(portal_id))
         finally:
             await fetcher.aclose()

@@ -58,7 +58,7 @@ def test_attach_reports_browser_runtime_failure(monkeypatch, stage, error, reaso
         if stage == "startup":
             raise error
 
-        async def launch():
+        async def launch(**kwargs):
             raise error
 
         yield SimpleNamespace(chromium=SimpleNamespace(launch=launch))

@@ -146,6 +146,29 @@ def test_documents_behind_a_login_fail_the_portal_with_a_reason(portal) -> None:
     assert db.tenders_for(portal_id) == []
 
 
+def test_failed_file_revalidation_keeps_the_verified_file(portal, monkeypatch):
+    db, portal_id = portal
+    _read_once(db, portal_id)
+    previous = db.tenders_for(portal_id)
+    respond = server._file_response
+
+    def fail_one(tender_id, filename):
+        if tender_id == "MOCK-001":
+            raise server.HTTPException(503)
+        return respond(tender_id, filename)
+
+    monkeypatch.setattr(server, "_file_response", fail_one)
+    db.execute("UPDATE document_sources SET last_downloaded_at=0")
+    _read_once(db, portal_id)
+    # One file server outage must not stop the read: the tender keeps its last verified file.
+    assert db.tenders_for(portal_id) == previous
+    assert db.portal_get(portal_id)["state"] == "serving"
+    notes = " ".join(run["notes"] for run in db.runs_for(portal_id))
+    assert "1 known document(s) could not be checked again" in notes
+    assert db.one("SELECT count(DISTINCT run_id) AS n FROM read_documents")["n"] == 2
+    assert all(run["kind"] == "read" for run in db.runs_for(portal_id))
+
+
 def test_file_over_the_cap_is_left_out_and_the_portal_still_serves(portal, monkeypatch) -> None:
     db, portal_id = portal
     monkeypatch.setattr(documents, "MAX_DOC_BYTES", 10_000)

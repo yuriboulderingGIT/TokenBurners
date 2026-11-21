@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.config import DB_PATH
 from app.models import Recipe, Tender
@@ -69,6 +70,27 @@ CREATE TABLE IF NOT EXISTS documents (
     sha256 TEXT NOT NULL,
     path_on_disk TEXT NOT NULL,
     source_url TEXT                    -- the link it came from (ZIP members share their archive's link)
+);
+CREATE TABLE IF NOT EXISTS document_sources (
+    portal_id TEXT NOT NULL,
+    tender_id TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    file_ids TEXT NOT NULL,
+    etag TEXT,
+    last_modified TEXT,
+    validator_target TEXT NOT NULL,
+    last_verified_at REAL NOT NULL,
+    last_downloaded_at REAL NOT NULL,
+    PRIMARY KEY (portal_id, tender_id, source_key)
+);
+CREATE TABLE IF NOT EXISTS read_documents (
+    run_id TEXT NOT NULL,
+    tender_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    file_id TEXT NOT NULL,
+    PRIMARY KEY (run_id, tender_id, ordinal)
 );
 CREATE TABLE IF NOT EXISTS llm_calls (
     portal_id TEXT,
@@ -130,6 +152,63 @@ class DB:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS documents_by_source ON documents (portal_id, tender_id, source_url)"
         )
+
+        tender_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(tenders)")}
+        for column in ("missing_since", "source_status", "detail_url", "detail_checked_at"):
+            if column not in tender_columns:
+                self._conn.execute(f"ALTER TABLE tenders ADD COLUMN {column} TEXT")
+        if "missing_since" not in tender_columns:
+            self._conn.execute(
+                "UPDATE tenders AS t SET missing_since = "
+                "(SELECT MAX(last_seen_at) FROM tenders WHERE portal_id = t.portal_id) "
+                "WHERE last_seen_at < (SELECT MAX(last_seen_at) FROM tenders WHERE portal_id = t.portal_id)"
+            )
+        portal_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(portals)")}
+        if "monitoring_scope" not in portal_columns:
+            self._conn.execute("ALTER TABLE portals ADD COLUMN monitoring_scope TEXT")
+        self._quarantine_legacy_categories()
+
+    def _quarantine_legacy_categories(self) -> None:
+        """Archive the false category rows identified in the November 2026 review."""
+        if self.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_category_rows'"):
+            return
+        with self.transaction() as conn:
+            # Copy the complete original record. A subsequent real notice may use the same portal ID.
+            conn.execute("CREATE TABLE IF NOT EXISTS legacy_category_rows AS SELECT * FROM tenders WHERE 0")
+            affected: set[str] = set()
+            rows = conn.execute(
+                "SELECT portal_id, id, json, COUNT(*) OVER "
+                "(PARTITION BY portal_id, json_extract(json, '$.url')) AS sharing_url FROM tenders "
+                "WHERE json_valid(json) AND json_type(json, '$.url')='text' "
+                "AND json_extract(json, '$.url') LIKE '%/categoryOverview.do%'"
+            ).fetchall()
+            for row in rows:
+                data = json.loads(row["json"])
+                if row["sharing_url"] != 1 or any(data.get(field) for field in (
+                    "buyerName", "submissionDeadline", "publicationDate", "documents", "referenceNumber",
+                )):
+                    continue
+                try:
+                    url = urlsplit(data["url"])
+                except ValueError:
+                    continue
+                if (url.scheme not in {"http", "https"} or not url.hostname or not url.query
+                        or url.path.rsplit("/", 1)[-1].casefold() != "categoryoverview.do"):
+                    continue
+                key = row["portal_id"], row["id"]
+                conn.execute("INSERT INTO legacy_category_rows SELECT * FROM tenders WHERE portal_id=? AND id=?", key)
+                conn.execute("DELETE FROM tenders WHERE portal_id=? AND id=?", key)
+                affected.add(row["portal_id"])
+            for portal_id in affected:
+                count = conn.execute("SELECT COUNT(*) FROM tenders WHERE portal_id=?", (portal_id,)).fetchone()[0]
+                reason = (f"delivering {count} tenders after excluding historical category links" if count
+                          else "the old listing contained only category links; refresh to repair the recipe")
+                conn.execute(
+                    "UPDATE portals SET tender_count=?, reason=CASE WHEN state='serving' THEN ? ELSE reason END, "
+                    "state=CASE WHEN state='serving' AND ?=0 THEN 'failed' ELSE state END, "
+                    "last_success_at=CASE WHEN ?=0 THEN NULL ELSE last_success_at END WHERE id=?",
+                    (count, reason, count, count, portal_id),
+                )
 
     # ----- low level -----
 
@@ -298,23 +377,28 @@ class DB:
         return [json.loads(r["json"]) for r in rows]
 
     def tenders_listed_last(self, portal_id: str) -> list[dict[str, Any]]:
-        """The tenders the last healthy read actually saw (not older ones kept as closed)."""
-        rows = self.all(
-            "SELECT json FROM tenders WHERE portal_id = ? AND last_seen_at = "
-            "(SELECT MAX(last_seen_at) FROM tenders WHERE portal_id = ?) ORDER BY id",
-            (portal_id, portal_id),
-        )
+        """Only rows present in the last healthy listing participate in the next health comparison."""
+        rows = self.all("SELECT json FROM tenders WHERE portal_id = ? AND missing_since IS NULL ORDER BY id",
+                        (portal_id,))
         return [json.loads(r["json"]) for r in rows]
 
+    def unlisted_active_details(self, portal_id: str, listed: set[str]):
+        return self.all(
+            "SELECT id, detail_url FROM tenders WHERE portal_id = ? AND status = 'open' AND detail_url IS NOT NULL "
+            "AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY detail_checked_at, id",
+            (portal_id, json.dumps(sorted(listed))),
+        )
+
     def save_tenders(
-        self, portal_id: str, tenders: list[Tender], *,
+        self, portal_id: str, tenders: list[Tender], *, scope: str | None = None,
+        detail_urls: dict[str, str] | None = None, source_statuses: dict[str, str] | None = None,
+        rechecks: dict[str, tuple[Tender, str | None] | None] | None = None,
+        run_id: str | None = None, results_window: bool = False,
         repaired_recipe: Recipe | None = None, repair_cost_usd: float = 0.0,
     ) -> int:
-        """Store a healthy read. Changed tenders get a new lastChangedAt.
-
-        Tenders that are no longer listed are kept and marked closed (plan section 9).
-        Returns the number of tenders now stored for the portal.
-        """
+        """Atomically publish a healthy listing. Notices it no longer lists are kept and marked closed,
+        except in a latest-results window: there only closure evidence or the deadline closes them.
+        Every absent notice records when it left the listing (missing_since)."""
         now = now_iso()
         seen: set[str] = set()
         with self.transaction() as conn:
@@ -324,18 +408,51 @@ class DB:
                 seen.add(tender.id)
                 data = tender.api_dict()
                 self._upsert_tender(conn, portal_id, data, now)
-            rows = conn.execute(
-                "SELECT id, json FROM tenders WHERE portal_id = ? AND status != 'closed'", (portal_id,)
+                if run_id is not None:
+                    conn.executemany(
+                        "INSERT INTO read_documents (run_id, tender_id, ordinal, file_id) VALUES (?, ?, ?, ?)",
+                        [(run_id, tender.id, pos, doc.path.removeprefix("/files/"))
+                         for pos, doc in enumerate(tender.documents)],
+                    )
+                conn.execute(
+                    "UPDATE tenders SET missing_since = NULL, detail_checked_at = NULL, detail_url = ?, "
+                    "source_status = ? WHERE portal_id = ? AND id = ?",
+                    ((detail_urls or {}).get(tender.id), (source_statuses or {}).get(tender.id), portal_id, tender.id),
+                )
+            conn.execute(
+                "UPDATE tenders SET missing_since = ? WHERE portal_id = ? AND missing_since IS NULL "
+                "AND id NOT IN (SELECT value FROM json_each(?))", (now, portal_id, json.dumps(sorted(seen))),
+            )
+            # The brief: a tender is closed once the portal no longer lists it. A latest-results
+            # window also drops notices that are still open, so there a notice keeps its status
+            # until its own page says otherwise or its deadline passes (served closed then).
+            rechecks = rechecks or {}
+            missing = conn.execute(
+                "SELECT id, json FROM tenders WHERE portal_id = ? AND missing_since IS NOT NULL AND status = 'open'",
+                (portal_id,),
             ).fetchall()
-            for row in rows:
-                if row["id"] not in seen:
-                    data = json.loads(row["json"])
+            for row in missing:
+                ident, data = row["id"], json.loads(row["json"])
+                if ident in rechecks:
+                    conn.execute("UPDATE tenders SET detail_checked_at = ? WHERE portal_id = ? AND id = ?",
+                                 (now, portal_id, ident))
+                if (observation := rechecks.get(ident)) is not None:
+                    detail, raw_status = observation
+                    if raw_status:
+                        conn.execute("UPDATE tenders SET source_status = ? WHERE portal_id = ? AND id = ?",
+                                     (raw_status, portal_id, ident))
+                    if detail.submissionDeadline:
+                        data["submissionDeadline"] = detail.submissionDeadline
+                    if detail.status in {"closed", "withdrawn"}:
+                        data["status"] = detail.status
+                if data["status"] == "open" and not results_window:
                     data["status"] = "closed"
-                    self._upsert_tender(conn, portal_id, data, now, seen_now=False)
+                self._upsert_tender(conn, portal_id, data, now, seen_now=False)
             count = conn.execute(
                 "SELECT COUNT(*) AS n FROM tenders WHERE portal_id = ?", (portal_id,)
             ).fetchone()["n"]
-            conn.execute("UPDATE portals SET tender_count = ? WHERE id = ?", (count, portal_id))
+            conn.execute("UPDATE portals SET tender_count = ?, monitoring_scope = COALESCE(?, monitoring_scope) "
+                         "WHERE id = ?", (count, scope, portal_id))
             if repaired_recipe is not None:
                 self._insert_recipe(conn, portal_id, repaired_recipe, "repair", repair_cost_usd)
         return count
@@ -387,10 +504,16 @@ class DB:
         return self.one("SELECT * FROM documents WHERE file_id = ?", (file_id,))
 
     def documents_from_source(self, portal_id: str, tender_id: str, source_url: str) -> list[sqlite3.Row]:
-        """Files already stored for this tender from this link, in the order they were added."""
+        """All revisions from this source, including files from before validator tracking."""
         return self.all(
             "SELECT * FROM documents WHERE portal_id = ? AND tender_id = ? AND source_url = ? ORDER BY rowid",
             (portal_id, tender_id, source_url),
+        )
+
+    def source_files(self, file_ids: str) -> list[sqlite3.Row]:
+        return self.all(
+            "SELECT d.* FROM json_each(?) ids JOIN documents d ON d.file_id = ids.value ORDER BY ids.key",
+            (file_ids,),
         )
 
     # ----- model cost -----

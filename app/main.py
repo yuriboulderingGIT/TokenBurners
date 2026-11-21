@@ -8,6 +8,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -142,9 +143,10 @@ async def delete_portal(portal_id: str, request: Request) -> Response:
 
 
 @app.post("/portals/{portal_id}/refresh", status_code=202)
-async def refresh_portal(portal_id: str, request: Request) -> dict:
+async def refresh_portal(portal_id: str, request: Request,
+                         action: Literal["refresh", "repair", "relearn"] = "refresh") -> dict:
     _portal_or_404(portal_id)
-    return {"runId": _worker(request).request_read(portal_id)}
+    return {"runId": _worker(request).request_read(portal_id, action=action)}
 
 
 @app.get("/portals/{portal_id}/tenders")
@@ -226,6 +228,9 @@ async def portal_page(portal_id: str, request: Request):
         "portal": dict(row),
         "host": parts[2] if len(parts) > 2 else row["url"],
         "tenders": tenders,
+        "missing": {r["id"]: r["missing_since"] for r in db.all(
+            "SELECT id, missing_since FROM tenders WHERE portal_id = ? AND missing_since IS NOT NULL", (portal_id,)
+        )},
         "open_count": sum(t["status"] == "open" for t in tenders),
         "doc_count": sum(len(t["documents"]) for t in tenders),
         "runs": runs,

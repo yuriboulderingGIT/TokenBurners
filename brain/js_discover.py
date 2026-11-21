@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from app.db import now_iso
 from app.fetcher import PortalCancelled, PortalFetcher
-from app.models import Health, Recipe
+from app.models import Health, Recipe, SearchTransport
 from brain.blocks import Blocked, detect_block
 from brain.llm import ScopedLLM
 from brain.public_search import ANTI_FORGERY_HEADERS, ObservedSearch, PublicVisit, api_subdomain, fragment_path, at_path
@@ -121,6 +121,12 @@ async def discover_json_api(
     if isinstance(key, ObservedSearch):
         search = key.spec.model_copy()
         search.html_path = fragment_path(payload)
+        search.result_item = list_spec.get("item")
+        # Detail selectors cannot describe the shape of a listing row.
+        fields = candidate.get("fields")
+        if isinstance(fields, dict):
+            search.record_fields = {k: v for k, v in fields.items()
+                                    if k in {"id", "title"} and isinstance(v, str)}
         total_path = list_spec.get("total_path", candidate.get("total_path", result.get("total_path")))
         if isinstance(total_path, list) and total_path and all(isinstance(k, str) for k in total_path):
             value = at_path(payload, total_path)
@@ -151,7 +157,7 @@ async def discover_json_api(
         return None
 
 
-async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = None) -> list[tuple]:
+async def _capture_json(url: str, fetch: PortalFetcher, *, target: SearchTransport | None = None) -> list[tuple]:
     origin = portal_origin(url)
     if origin is None:
         return []
@@ -184,7 +190,7 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = 
         request = route.request
         await adopt_page_cookies(request.url)
         if (requests < _MAX_REQUESTS and cancelled is None and request.method == "POST"
-                and request.resource_type in {"xhr", "fetch"} and (target is None or request.url == target)):
+                and request.resource_type in {"xhr", "fetch"}):
             search = ObservedSearch.observe(url, request, visit, source_total)
             # One GraphQL URL serves several operations; the body tells them apart. Only an
             # observed search has a text body: other POSTs may be compressed or binary.
@@ -194,9 +200,19 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = 
                 try:
                     payload = await search.read(0, 0)
                     post_replies[key] = payload
-                    if fragment_path(payload) is not None or _feed_rank(payload, urlsplit(request.url).path):
-                        searches[key] = (search, payload)
-                        ready.set()
+                    if target is not None:
+                        if search.matches(target, payload):
+                            searches[key] = (search, payload)
+                            # Old recipes must gather all candidates through the bounded
+                            # observation window so an ambiguous first operation cannot win.
+                            if target.operation_id is not None:
+                                ready.set()
+                    else:
+                        rank = _feed_rank(payload, urlsplit(request.url).path)
+                        if fragment_path(payload) is not None or rank:
+                            searches[key] = (search, payload)
+                            if rank >= _STRONG_FEED:
+                                ready.set()
                 except PortalCancelled as exc:
                     cancelled = exc
                     ready.set()
@@ -307,7 +323,15 @@ async def _capture_json(url: str, fetch: PortalFetcher, *, target: str | None = 
                 log.debug("Playwright could not start: %s", exc)
                 raise DiscoveryUnavailable("could not start Playwright for browser discovery") from exc
             try:
-                browser = await playwright.chromium.launch()
+                # PublicVisit fulfills portal HTTP through the checked Fetcher. Disable
+                # direct browser egress, including speculative DNS and peer connections.
+                browser = await playwright.chromium.launch(args=[
+                    "--proxy-server=http://offline.invalid:80",
+                    "--proxy-bypass-list=<-loopback>",
+                    "--host-resolver-rules=MAP * ~NOTFOUND",
+                    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                    "--disable-quic",
+                ])
             except (Error, OSError) as exc:
                 log.debug("Chromium could not launch: %s", exc)
                 if "Executable doesn't exist" in str(exc):

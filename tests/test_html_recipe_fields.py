@@ -100,9 +100,9 @@ def test_attach_recovers_full_listing_null_field_and_missed_next_link():
     page_two = listing + "&page=2"
     pages = {
         entry: f'<a href="{listing}">View all tenders</a><article>Market highlights</article>',
-        listing: '<article data-id="1">School roof</article>'
+        listing: '<article class="notice" data-id="1">School roof</article>'
                  '<a aria-label="Next page" href="?country=DE&amp;page=2">→</a>',
-        page_two: '<article data-id="2">School desks</article>'
+        page_two: '<article class="notice" data-id="2">School desks</article>'
                   '<a aria-label="Next page" aria-disabled="true" href="?page=3">→</a>',
     }
     proposals = []
