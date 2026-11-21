@@ -1,7 +1,7 @@
 # Watchtower Plan v4
 
-**TokenBurners · Patterno track · Checkpoint at 01:55 CET, 21 November 2026**  
-Status after PR #22, what is done from Erik's review and plan v3, and what is left until hand-in. Replaces plan v3.
+**TokenBurners · Patterno track · Checkpoint at 01:55 CET, 21 November 2026 (test set review added 02:00)**  
+Status after PR #22, what is done from Erik's review and plan v3, how the test set and the code meet the brief's test-portal rules, and what is left until hand-in. Replaces plan v3.
 
 ## 1. Where we stand
 
@@ -68,7 +68,7 @@ Status after PR #22, what is done from Erik's review and plan v3, and what is le
 | --- | --- | --- |
 | P0-A Deliver the right notices and state | Done | Duplicate IDs (#20), category rows and coverage (#22), missing documents (35d8f90), page limit (4cd6104), scope on the dashboard (#22). A verified empty result is still unsupported (Erik P2). |
 | P0-B Portal sessions and browser reads | Done | #20. The copies of the audit probes in `tests/test_site_reading_audit.py` pass. `output/site_read_reproductions.py` launches Microsoft Edge, so its 6 browser probes only run where Edge is installed. |
-| P0-C Identity and bytes through repair | Done offline | Atomic repair, last good snapshot, scope check and file revisions are tested. A real-model repair on the release SHA is still open (section 5). |
+| P0-C Identity and bytes through repair | Done offline | Atomic repair, last good snapshot, scope check and file revisions are tested. A real-model repair on the release SHA is still open (section 6). |
 | P1-D Initial transient retry | Done | #20 |
 | P1-E Effective base URL | Done | #20 |
 | P1-F Reuse one attach traversal | Done | #20: the first read reuses validated listing pages. |
@@ -76,36 +76,59 @@ Status after PR #22, what is done from Erik's review and plan v3, and what is le
 | P1-H Verified handoffs | Partly | API subdomain GET discovery and repair done (#20, 84f807f). Documents on another host are still dropped. |
 | P2 Targets and docs | Done | BOAMP bounded (4cd6104). README's `LLM_CACHE` default corrected to 0 in this update. |
 
-## 5. What is left before hand-in
+## 5. Test set and traps from the brief
+
+The brief's "Finding test portals" page sets five rules for our test set (`testset/portals.yaml`, 10 portals, owner A2) and names four traps Patterno meets every week.
+
+| Brief's rule for the test set | Status | Detail |
+| --- | --- | --- |
+| Each portal has a public list and 5+ open tenders whose documents download without login | Open | Not checked for any portal in the set; the notes say "document access unverified" or "outside this check". BOAMP has no documents (an aggregator). In Erik's run only Cyprus delivered files: 4 PDFs across 10 tenders. Masaryk E-ZAK (482 files on 28 tenders), Berlin and Charité have file evidence but are not in the set. |
+| 4+ countries and 3+ portal software packages | Done | 7 countries (IE, GB, DE, FR, NL, CY, MT), 7 packages (European Dynamics ePPS, cosinex, DTVP, Sell2Wales, BOAMP on Opendatasoft, TenderNed, PLACE). |
+| A mix of server-built pages, JavaScript apps with a JSON API, and multi-step downloads | Partly | 7 server-rendered and 2 JSON portals (BOAMP, TenderNed). The only multi-step portal, PLACE, answered 503 and was never checked directly. |
+| 1–2 portals whose documents need a login or a captcha | Partly | Sell2Wales requires registration for attachments. No real captcha portal; only the mock's captcha switch. |
+| A few portals stay unseen until the final test | Open | `testset/secret.yaml` is git-ignored but missing on mihaly's machine. Check whether a teammate has it. |
+
+| Trap from the brief | Status | How the code handles it |
+| --- | --- | --- |
+| Notice links lead to a summary page, not the tender | Partly | Caught when every tender shares one address or the sample shows no files: the model gets one more cheap try, else the portal reports `failed: no documents`. Category links are rejected (#22) and notice permalinks recovered (#13). There is no general second hop from a per-tender summary page to the full tender: `documents.steps` exists in the recipe format but nothing uses it, and only Berlin, Charité and E-ZAK have their own helpers. |
+| Deadlines are shown in local time | Done | An offset on the page is kept. Otherwise the zone comes from the recipe, then the country, then the domain (.de means Europe/Berlin). An unknown zone or a wall time skipped or repeated at a daylight-saving change gives `null`, not a wrong value. Gap: a deadline without a time becomes `null` (Erik P2). |
+| ZIP files can be larger than 1 GB | Done | Downloads stop at 250 MB, which the brief allows us to leave out, checked from Content-Length and again while streaming. Unpacking is capped at 1 GB and 1,000 files per archive. Tests use a 300 MB stand-in. |
+| A portal shows a captcha, yet the documents download | Done | A page counts as blocked only when it shows no content, so a captcha beside real rows is ignored (tested over 21 pages). Each file is judged by its own response: real files are delivered, and a login or captcha page in place of a file marks the portal blocked. |
+
+## 6. What is left before hand-in
 
 Feature work is over. Only fixes with a test, and only if they keep the 45-rule contract and CI green.
 
 | # | Task | Owner | Done when |
 | --- | --- | --- | --- |
 | 1 | Real-model proof on the release SHA: mock attach, then layout v2 and repair (about $0.04) | B1 | `python -m brain.proof --live --only mock` passes; cost recorded. Needs the budget owner's OK. |
-| 2 | Re-run the 10 public portals on the release SHA | A2 with Erik (ran the last one) | NRW and Brandenburg fail honestly instead of serving categories; Cyprus still serves with files; spend recorded. |
-| 3 | One fresh public attach for the demo | B2 | Cyprus or TenderNed: five open tenders checked by hand against the source, files downloadable. |
-| 4 | README update | A2 | Measured cost from tasks 1 and 2; known limits from section 3 (P2) and P1-G stated plainly. |
-| 5 | Video, 3:00 maximum | A1 | Not in the repo yet. Show URL-only attach, a tender with a file, a layout change healing, and a truthful blocked state. |
-| 6 | Lock the release SHA | Release lead | 08:30. After that, merges only with a second reviewer and a green CI. |
-| 7 | Submit | Release lead | Repo link, video, README, judging key handed over privately, by 10:30. |
-| 8 | Optional: make `output/site_read_reproductions.py` use Chromium | Anyone | Its browser probes run on macOS and Linux. |
+| 2 | Check every test portal for 5 open tenders whose documents download without login; replace those that fail | A2 | Each entry in `portals.yaml` records the open tenders checked, the files downloaded and the date. Candidates with file evidence: Masaryk E-ZAK, Berlin, Charité. Polite requests only, no model calls. |
+| 3 | Create the held-out set and add one real captcha portal | A2 | `testset/secret.yaml` (never committed) holds 2–3 checked portals that nobody runs before the final test. One portal whose documents sit behind a captcha is in the public set. |
+| 4 | Re-run the public test set on the release SHA | A2 with Erik (ran the last one) | Uses the corrected set from task 2. NRW and Brandenburg fail honestly instead of serving categories; Cyprus still serves with files; spend recorded. |
+| 5 | One fresh public attach for the demo | B2 | Cyprus, Masaryk or TenderNed: five open tenders checked by hand against the source, files downloadable. |
+| 6 | README update | A2 | Measured cost from tasks 1 and 4; known limits stated plainly: section 3 (P2), P1-G, and the summary-page second hop from section 5. |
+| 7 | Video, 3:00 maximum | A1 | Not in the repo yet. Show URL-only attach, a tender with a file, a layout change healing, and a truthful blocked state. |
+| 8 | Lock the release SHA | Release lead | 08:30. After that, merges only with a second reviewer and a green CI. |
+| 9 | Submit | Release lead | Repo link, video, README, judging key handed over privately, by 10:30. |
+| 10 | Optional: make `output/site_read_reproductions.py` use Chromium | Anyone | Its browser probes run on macOS and Linux. |
 
 **Behaviors to know for the demo.** A tender that disappears from a normal listing turns `closed` at once. Refreshing a failed portal repeatedly calls the model at most once an hour. Document checks are bounded to 30 files per read. Set `PUBLIC_DESTINATIONS_ONLY=1` only for a public deployment.
 
-## 6. Schedule
+<!-- pagebreak -->
+
+## 7. Schedule
 
 | CET · 21 Nov | Owner | Exit condition |
 | --- | --- | --- |
-| 02:00–07:30 | B1, A2 | Tasks 1 and 2 when the budget owner approves. Small fixes only, each with a test. |
-| 07:30–08:30 | A2, A1 | Dashboard screenshots, demo portal checked (task 3), README numbers (task 4). |
+| 02:00–07:30 | B1, A2 | B1: task 1 when the budget owner approves. A2: tasks 2 and 3, then 4. Small fixes only, each with a test. |
+| 07:30–08:30 | A2, A1 | Dashboard screenshots, demo portal checked (task 5), README numbers (task 6). |
 | 08:30–09:00 | Release lead, video owner | Release SHA locked, video cut. |
 | 09:00–10:30 | Release lead | Clean image built from the SHA, README and run command checked, submission sent. |
 | 11:00 | Organizer | Submissions close. |
 
 **Cost on record.** Mock attach $0.005485, mock repair $0.028319, ordinary refresh $0. Cyprus attach $0.019190 (10 tenders, 4 files). Erik's 10-portal run on 21 Nov cost $0.260324 in total. TenderNed attach $0.0017 (4cd6104). Label every number with its data folder and SHA when it goes into the README.
 
-## 7. Briefing for coding agents
+## 8. Briefing for coding agents
 
 Paste this before any task:
 
